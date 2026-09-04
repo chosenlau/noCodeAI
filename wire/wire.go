@@ -1,12 +1,14 @@
-package main
+package wire
 
 import (
-	"flag"
 	"fmt"
 
 	"github.com/chosenlau/noCodeAI/config"
+
+	"github.com/chosenlau/noCodeAI/internal/dal"
 	"github.com/chosenlau/noCodeAI/internal/router"
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/google/wire"
 )
 
 func initServer() *server.Hertz {
@@ -19,16 +21,13 @@ func initServer() *server.Hertz {
 	router.RegisterRoutes(h)
 	return h
 }
-func main() {
-	env := flag.String("env", "", "executing environment:local,dev,test")
 
-	flag.Parse()
-	if env == nil || *env == "" {
-		panic("-env is required,executing environment:local,dev,test")
-	}
-	config.InitConfig(*env)
-	initInfo()
+var dbSet = wire.NewSet(
+	dal.InitDB, // 提供 *gorm.DB
+)
 
-	h:= initServer()
-	h.Spin()
+func InitializeApp() (*server.Hertz, error) {
+	panic(wire.Build(
+		initServer,
+	))
 }

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -56,12 +57,18 @@ func GetProjectRootPath() (string, error) {
 	}
 }
 
-func InitConfig(env string) {
+func InitConfig() *Config {
+	env := flag.String("env", "", "executing environment:local,dev,test")
+
+	flag.Parse()
+	if env == nil || *env == "" {
+		*env = "local"
+	}
 	rootPath, err := GetProjectRootPath()
 	if err != nil {
 		panic(err)
 	}
-	cfgName := fmt.Sprintf("config-%s.yml", env)
+	cfgName := fmt.Sprintf("config-%s.yml", *env)
 	cfgPath := filepath.Join(rootPath, "config", cfgName)
 
 	viper.SetConfigFile(cfgPath)
@@ -79,6 +86,8 @@ func InitConfig(env string) {
 	if err := viper.Unmarshal(GlobalConfig); err != nil {
 		panic(fmt.Errorf("failed to unmarshal config: %v", err))
 	}
+
+	return GlobalConfig
 }
 
 func (c *Config) GetDatabaseDSN() string {

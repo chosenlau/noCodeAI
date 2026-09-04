@@ -1,7 +1,7 @@
 package request
 
 type DeleteRequest struct {
-	Id int `json:"id"`
+	Id int64 `json:"id"`
 }
 
 type PageRequest struct {

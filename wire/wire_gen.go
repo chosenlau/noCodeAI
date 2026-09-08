@@ -9,23 +9,38 @@ package wire
 import (
 	"fmt"
 	"github.com/chosenlau/noCodeAI/config"
+	"github.com/chosenlau/noCodeAI/internal/dal"
+	"github.com/chosenlau/noCodeAI/internal/handler"
 	"github.com/chosenlau/noCodeAI/internal/router"
+	"github.com/chosenlau/noCodeAI/internal/service"
 	"github.com/cloudwego/hertz/pkg/app/server"
+	"github.com/google/wire"
 )
 
 // Injectors from wire.go:
 
 func InitializeApp() (*server.Hertz, error) {
-	hertz := initServer()
+	configConfig := config.InitConfig()
+	db := dal.InitDB(configConfig)
+	iUserService := service.NewUserService(db)
+	userHandler := handler.NewUserHandler(iUserService)
+	hertz := initServer(configConfig, userHandler)
 	return hertz, nil
 }
 
 // wire.go:
 
-func initServer() *server.Hertz {
-	cfg := config.GlobalConfig
+var configSet = wire.NewSet(config.InitConfig)
+
+var dbSet = wire.NewSet(dal.InitDB)
+
+var serviceSet = wire.NewSet(service.NewUserService)
+
+var handlerSet = wire.NewSet(handler.NewUserHandler)
+
+func initServer(cfg *config.Config, userHandler *handler.UserHandler) *server.Hertz {
 
 	h := server.Default(server.WithHostPorts(fmt.Sprintf(":%d", cfg.Server.Port)), server.WithBasePath(cfg.Server.ContextPath))
-	router.RegisterRoutes(h)
+	router.RegisterRoutes(h, userHandler)
 	return h
 }

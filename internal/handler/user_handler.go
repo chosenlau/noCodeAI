@@ -52,7 +52,10 @@ func (h *UserHandler) UserLogin(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	// TODO(auth): 当前为开发阶段简易实现，生产环境需迁移至 JWT 或服务端 Session 机制，防止伪造 user_id
+
 	c.SetCookie("user_id", strconv.FormatInt(userVo.ID, 10),
+		86400, "/", "", protocol.CookieSameSiteLaxMode, false, true)
+	c.SetCookie("user_role", userVo.UserRole,
 		86400, "/", "", protocol.CookieSameSiteLaxMode, false, true)
 
 	c.JSON(consts.StatusOK, response.NewSuccessResponse[*api.UserVo](userVo))
@@ -80,7 +83,7 @@ func (h *UserHandler) GetLoginUserVo(ctx context.Context, c *app.RequestContext)
 		return
 	}
 
-	c.JSON(consts.StatusOK, response.NewSuccessResponse[*api.UserVo](userVo))
+	c.JSON(consts.StatusOK, response.NewSuccessResponse(userVo))
 }
 
 func (h *UserHandler) UserLogout(ctx context.Context, c *app.RequestContext) {
@@ -90,6 +93,7 @@ func (h *UserHandler) UserLogout(ctx context.Context, c *app.RequestContext) {
 func (h *UserHandler) clearUserCookie(c *app.RequestContext) {
 	// Setting MaxAge to -1 instructs the browser to immediately delete the cookie
 	c.SetCookie("user_id", "", -1, "/", "", protocol.CookieSameSiteLaxMode, false, true)
+	c.SetCookie("user_role", "", -1, "/", "", protocol.CookieSameSiteLaxMode, false, true)
 }
 func (h *UserHandler) AddUser(ctx context.Context, c *app.RequestContext) {
 	req := &api.NoCodeUserAddRequest{}

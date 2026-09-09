@@ -5,14 +5,15 @@ import (
 
 	"github.com/chosenlau/noCodeAI/config"
 	"github.com/cloudwego/eino-ext/components/model/openai"
+	"github.com/cloudwego/eino/components/model"
 )
 
-type ChatModelWrapper struct {
+type OpenAIChatModelWrapper struct {
 	*openai.ChatModel
 	ModelName string
 }
 
-func NewChatModel(cfg *config.Config) *ChatModelWrapper {
+func NewOpenAIChatModel(cfg *config.Config) *OpenAIChatModelWrapper {
 	model, err := openai.NewChatModel(context.Background(), &openai.ChatModelConfig{
 		APIKey:  cfg.AI.APIKey,
 		Model:   cfg.AI.Model,
@@ -21,16 +22,16 @@ func NewChatModel(cfg *config.Config) *ChatModelWrapper {
 	if err != nil {
 		panic(err)
 	}
-	return &ChatModelWrapper{
+	return &OpenAIChatModelWrapper{
 		ChatModel: model,
 		ModelName: cfg.AI.Model,
 	}
 }
 
-func (c *ChatModelWrapper) GetModelName() string {
+func (c *OpenAIChatModelWrapper) GetModelName() string {
 	return c.ModelName
 }
 
-func (c *ChatModelWrapper) GetChatModel() *openai.ChatModel {
+func (c *OpenAIChatModelWrapper) GetChatModel() model.ToolCallingChatModel {
 	return c.ChatModel
 }

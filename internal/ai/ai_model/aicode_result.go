@@ -1,4 +1,4 @@
-package model
+package aimodel
 
 type HtmlCodeResponse struct {
 	HtmlCode    string `json:"htmlCode"`

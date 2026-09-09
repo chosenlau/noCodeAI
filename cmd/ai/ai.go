@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/chosenlau/noCodeAI/config"
-	"github.com/cloudwego/eino-ext/components/model/openai"
+	"github.com/cloudwego/eino-ext/components/model/claude"
 	"github.com/cloudwego/eino/adk"
 )
 
@@ -14,11 +14,14 @@ func main() {
 	cfg := config.InitConfig().AI
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	model, _ := openai.NewChatModel(ctx, &openai.ChatModelConfig{
+	model, err := claude.NewChatModel(ctx, &claude.Config{
 		APIKey:  cfg.APIKey,
 		Model:   cfg.Model,
-		BaseURL: cfg.BaseURL,
+		BaseURL: &cfg.BaseURL,
 	})
+	if err != nil {
+		panic(fmt.Sprintf("model: %v", err))
+	}
 	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
 		Model: model,
 	})
@@ -33,7 +36,10 @@ func main() {
 			break
 		}
 		if event.Output != nil && event.Output.MessageOutput != nil {
-			msg, _ := event.Output.MessageOutput.GetMessage()
+			msg, err := event.Output.MessageOutput.GetMessage()
+			if err != nil {
+				panic(err)
+			}
 			fmt.Println(msg.Content)
 		}
 	}

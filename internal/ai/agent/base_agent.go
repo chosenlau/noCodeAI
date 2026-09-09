@@ -3,22 +3,23 @@ package agent
 import (
 	"context"
 	"errors"
+	"io"
 
 	"github.com/bytedance/gopkg/util/logger"
-	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/schema"
 )
 
 type ChatModelWrapperAdaptor interface {
-	GetChatModel() *openai.ChatModel
+	GetChatModel() model.ToolCallingChatModel
 	GetModelName() string
 }
 
 type BaseAgent struct {
-	model     *openai.ChatModel
+	model     model.ToolCallingChatModel
 	modelName string
 }
 
@@ -51,7 +52,7 @@ func (a *BaseAgent) NewAdkAgent(name, description, instruction string, tools []*
 
 	agent, err := adk.NewChatModelAgent(ctx, config)
 	if err != nil {
-		logger.Errorf("创建Agent失败: %v", err)
+		logger.Errorf("Agent creation failed: %v", err)
 		return nil
 	}
 	return agent
@@ -91,4 +92,59 @@ func (a *BaseAgent) Generate(ctx context.Context, userMessage string, chatTempla
 	}
 
 	return resultMsg, nil
+}
+
+func (a *BaseAgent) GenerateStream(ctx context.Context, userMessage string, chatTemplate prompt.ChatTemplate, adkAgent *adk.ChatModelAgent) (*schema.StreamReader[*schema.Message], error) {
+	format, err := chatTemplate.Format(ctx, map[string]any{
+		"content": userMessage,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+		Agent:           adkAgent,
+		EnableStreaming: true,
+	})
+
+	iter := runner.Run(ctx, format)
+
+	reader, writer := schema.Pipe[*schema.Message](2)
+
+	go func() {
+		defer writer.Close()
+		var fullContent string
+		for {
+			event, ok := iter.Next()
+			if !ok {
+				break
+			}
+			if event.Err != nil {
+				writer.Send(nil, event.Err)
+				return
+			}
+
+			if event.Output != nil && event.Output.MessageOutput != nil {
+				stream := event.Output.MessageOutput.MessageStream
+				if stream != nil {
+					for {
+						msg, err := stream.Recv()
+						if err == io.EOF {
+							break
+						}
+						if err != nil {
+							writer.Send(nil, err)
+							return
+						}
+						if msg != nil {
+							fullContent += msg.Content
+							writer.Send(msg, nil)
+						}
+					}
+				}
+			}
+		}
+	}()
+
+	return reader, nil
 }

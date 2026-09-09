@@ -13,24 +13,24 @@ import (
 
 func TestCodeGenAgent_GenerateHtmlCode(t *testing.T) {
 	initConfig := config.InitConfig()
-	chatModel := llm.NewChatModel(initConfig)
+	chatModel := llm.NewClaudeChatModel(initConfig)
 	codeGenAgent := NewCodeGenAgent(chatModel, enum.HtmlCodeGen)
-	code, err := codeGenAgent.GenerateHtmlCode(context.Background(), "做个mysql学习知识图")
+	code, err := codeGenAgent.GenerateHtmlCode(context.Background(), "test test test")
 	if err != nil {
-		return
+		panic(err)
 	}
 	assert.NotNil(t, code)
 }
 
 func TestCodeGenAgent_GenerateMultiFileCode(t *testing.T) {
 	initConfig := config.InitConfig()
-	chatModel := llm.NewChatModel(initConfig)
+	chatModel := llm.NewClaudeChatModel(initConfig)
 	codeGenAgent := NewCodeGenAgent(chatModel, enum.MultiFileGen)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	code, err := codeGenAgent.GenerateMultiFileCode(ctx, "做个留言版")
+	code, err := codeGenAgent.GenerateMultiFileCode(ctx, "this is a test")
 	if err != nil {
-		return
+		panic(err)
 	}
 	assert.NotNil(t, code)
 }

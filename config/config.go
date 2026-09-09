@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	"github.com/bytedance/gopkg/util/logger"
 	"github.com/spf13/viper"
@@ -36,7 +37,10 @@ type AIConfig struct {
 	BaseURL string `mapstructure:"base_url"`
 }
 
-var GlobalConfig *Config
+var (
+	GlobalConfig *Config
+	once         sync.Once
+)
 
 func GetProjectRootPath() (string, error) {
 	_, file, _, ok := runtime.Caller(0)
@@ -58,34 +62,36 @@ func GetProjectRootPath() (string, error) {
 }
 
 func InitConfig() *Config {
-	env := flag.String("env", "", "executing environment:local,dev,test")
+	once.Do(func() {
+		env := flag.String("env", "", "executing environment:local,dev,test")
 
-	flag.Parse()
-	if env == nil || *env == "" {
-		*env = "local"
-	}
-	rootPath, err := GetProjectRootPath()
-	if err != nil {
-		panic(err)
-	}
-	cfgName := fmt.Sprintf("config-%s.yml", *env)
-	cfgPath := filepath.Join(rootPath, "config", cfgName)
+		flag.Parse()
+		if env == nil || *env == "" {
+			*env = "local"
+		}
+		rootPath, err := GetProjectRootPath()
+		if err != nil {
+			panic(err)
+		}
+		cfgName := fmt.Sprintf("config-%s.yml", *env)
+		cfgPath := filepath.Join(rootPath, "config", cfgName)
 
-	viper.SetConfigFile(cfgPath)
-	viper.SetConfigType("yaml")
+		viper.SetConfigFile(cfgPath)
+		viper.SetConfigType("yaml")
 
-	viper.AutomaticEnv()
-	if err := viper.ReadInConfig(); err != nil {
-		panic(fmt.Errorf("failed to read config file: %v", err))
-	}
+		viper.AutomaticEnv()
+		if err := viper.ReadInConfig(); err != nil {
+			panic(fmt.Errorf("failed to read config file: %v", err))
+		}
 
-	logger.Infof("config path: %s", viper.ConfigFileUsed())
+		logger.Infof("config path: %s", viper.ConfigFileUsed())
 
-	GlobalConfig = &Config{}
+		GlobalConfig = &Config{}
 
-	if err := viper.Unmarshal(GlobalConfig); err != nil {
-		panic(fmt.Errorf("failed to unmarshal config: %v", err))
-	}
+		if err := viper.Unmarshal(GlobalConfig); err != nil {
+			panic(fmt.Errorf("failed to unmarshal config: %v", err))
+		}
+	})
 
 	return GlobalConfig
 }

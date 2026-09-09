@@ -1,15 +1,17 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 
 	"github.com/bytedance/gopkg/util/logger"
-	"github.com/chosenlau/noCodeAI/internal/ai/model"
+	aimodel "github.com/chosenlau/noCodeAI/internal/ai/ai_model"
 	"github.com/chosenlau/noCodeAI/internal/ai/prompt"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/schema"
 )
 
 type CodeGenAgent struct {
@@ -36,65 +38,70 @@ func (a *CodeGenAgent) getAdkAgent() *adk.ChatModelAgent {
 	}
 }
 
-func (a *CodeGenAgent) GenerateHtmlCode(ctx context.Context, userMessage string) (*model.HtmlCodeResponse, error) {
+func (a *CodeGenAgent) GenerateHtmlCode(ctx context.Context, userMessage string) (*aimodel.HtmlCodeResponse, error) {
 	chatTemplate, err := prompt.NewHtmlChatTemplate()
 	if err != nil {
 		return nil, err
 	}
 
 	adkAgent := a.getAdkAgent()
-	message, err := a.Generate(ctx, userMessage+
-		`You must answer strictly in the following JSON format:
-		{
-		  "htmlCode": "your html code here",
-		  "description": "description of the code"
-		}
-		IMPORTANT: You must answer ONLY with a valid JSON object, no markdown, no code blocks, no backticks.
-		`,
+	message, err := a.Generate(ctx, userMessage,
 		chatTemplate, adkAgent)
 	if err != nil {
 		return nil, err
 	}
-	var result model.HtmlCodeResponse
-	err = json.Unmarshal([]byte(message.Content), &result)
+	var result aimodel.HtmlCodeResponse
+	parsedContent := ParseCodeResponse([]byte(message.Content))
+	err = json.Unmarshal([]byte(parsedContent), &result)
 	if err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-func (a *CodeGenAgent) GenerateMultiFileCode(ctx context.Context, userMessage string) (*model.MultiFileCodeResponse, error) {
+func (a *CodeGenAgent) GenerateMultiFileCode(ctx context.Context, userMessage string) (*aimodel.MultiFileCodeResponse, error) {
 	chatTemplate, err := prompt.NewMultiFileChatTemplate()
 	if err != nil {
 		return nil, err
 	}
 
 	adkAgent := a.getAdkAgent()
-	message, err := a.Generate(ctx, userMessage+
-		`You must answer strictly in the following JSON format:
-		{
-		  "htmlCode": "your html code here",
-		  "description": "description of the code",
-		  "cssCode": "your css code here",
-		  "jsCode": "your javascript code here"
-		}
-		IMPORTANT: You must answer ONLY with a valid JSON object, no markdown, no code blocks, no backticks.
-		`,
+	message, err := a.Generate(ctx, userMessage,
 		chatTemplate, adkAgent)
 	if err != nil {
 		return nil, err
 	}
-	var result model.MultiFileCodeResponse
-	err = json.Unmarshal([]byte(message.Content), &result)
+	var result aimodel.MultiFileCodeResponse
+	parsedContent := ParseCodeResponse([]byte(message.Content))
+	err = json.Unmarshal([]byte(parsedContent), &result)
 	if err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
+func (a *CodeGenAgent) GenerateHtmlCodeStream(ctx context.Context, userMessage string) (*schema.StreamReader[*schema.Message], error) {
+	chatTemplate, err := prompt.NewHtmlChatTemplate()
+	if err != nil {
+		return nil, err
+	}
+
+	adkAgent := a.getAdkAgent()
+	return a.GenerateStream(ctx, userMessage, chatTemplate, adkAgent)
+}
+
+func (a *CodeGenAgent) GenerateMultiFileCodeStream(ctx context.Context, userMessage string) (*schema.StreamReader[*schema.Message], error) {
+	chatTemplate, err := prompt.NewMultiFileChatTemplate()
+	if err != nil {
+		return nil, err
+	}
+
+	adkAgent := a.getAdkAgent()
+	return a.GenerateStream(ctx, userMessage, chatTemplate, adkAgent)
+}
 func (a *CodeGenAgent) newMultiFileCodeGenAgent() *adk.ChatModelAgent {
 	if err := prompt.LoadPrompts(); err != nil {
-		logger.Errorf("加载prompts失败: %v", err)
+		logger.Errorf("loading prompts failed: %v", err)
 		return nil
 	}
 	return a.NewAdkAgent(
@@ -107,7 +114,7 @@ func (a *CodeGenAgent) newMultiFileCodeGenAgent() *adk.ChatModelAgent {
 
 func (a *CodeGenAgent) newHtmlFileCodeGenAgent() *adk.ChatModelAgent {
 	if err := prompt.LoadPrompts(); err != nil {
-		logger.Errorf("加载prompts失败: %v", err)
+		logger.Errorf("loading prompts failed: %v", err)
 		return nil
 	}
 	return a.NewAdkAgent(
@@ -116,4 +123,22 @@ func (a *CodeGenAgent) newHtmlFileCodeGenAgent() *adk.ChatModelAgent {
 		prompt.GetHtmlPrompt(),
 		[]*tool.BaseTool{},
 	)
+}
+
+func ParseCodeResponse(raw []byte) []byte {
+	cleaned := bytes.TrimSpace(raw)
+
+	if bytes.HasPrefix(cleaned, []byte("```json")) {
+		cleaned = bytes.TrimPrefix(cleaned, []byte("```json"))
+	} else if bytes.HasPrefix(cleaned, []byte("```")) {
+		cleaned = bytes.TrimPrefix(cleaned, []byte("```"))
+	}
+
+	if bytes.HasSuffix(cleaned, []byte("```")) {
+		cleaned = bytes.TrimSuffix(cleaned, []byte("```"))
+	}
+
+	cleaned = bytes.TrimSpace(cleaned)
+
+	return cleaned
 }

@@ -1,4 +1,4 @@
-package service
+package core
 
 import (
 	"context"
@@ -7,7 +7,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
-type INoCodeAIService interface {
+type INoCodeAIGenerator interface {
 	GenerateHtmlCode(ctx context.Context, userMessage string) (*aimodel.HtmlCodeResponse, error)
 	GenerateMultiFileCode(ctx context.Context, userMessage string) (*aimodel.MultiFileCodeResponse, error)
 	GenerateHtmlCodeStream(ctx context.Context, userMessage string) (*schema.StreamReader[*schema.Message], error)

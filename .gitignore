@@ -1,3 +1,5 @@
 config/config-local.yml
 mysql-cluster
 sql
+go.mod
+go.sum

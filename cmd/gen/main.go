@@ -16,6 +16,6 @@ func main() {
 	})
 	g.UseDB(db)
 
-	g.ApplyBasic(g.GenerateModel("user", gen.FieldJSONTag("id", "id,string")))
+	g.ApplyBasic(g.GenerateModel("app", gen.FieldJSONTag("id", "id,string")), g.GenerateModel("user", gen.FieldJSONTag("id", "id,string")))
 	g.Execute()
 }

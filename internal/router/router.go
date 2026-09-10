@@ -3,11 +3,10 @@ package router
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/chosenlau/noCodeAI/internal/handler"
-	"github.com/chosenlau/noCodeAI/pkg/constants"
+	"github.com/chosenlau/noCodeAI/internal/middleware"
 	"github.com/chosenlau/noCodeAI/pkg/errorutil"
 	"github.com/chosenlau/noCodeAI/pkg/response"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -18,7 +17,7 @@ import (
 	"github.com/hertz-contrib/cors"
 )
 
-func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler) {
+func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandler *handler.AppHandler) {
 	h.Use(cors.New(cors.Config{
 		AllowAllOrigins:  true,
 		AllowMethods:     []string{"*"},
@@ -35,14 +34,32 @@ func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler) {
 		userRoute.POST("/login", userHandler.UserLogin)
 		userRoute.GET("/get/vo", userHandler.GetUserByID)
 
-		userRoute.GET("/get/login",
-			AuthMiddleware(), userHandler.GetLoginUserVo)
-		userRoute.GET("/logout", AuthMiddleware(), userHandler.UserLogout)
+		userRoute.GET("/get/login", middleware.AuthMiddleware(), userHandler.GetLoginUserVo)
+		userRoute.GET("/logout", middleware.AuthMiddleware(), userHandler.UserLogout)
 
-		userRoute.POST("/add", AuthMiddleware(), DevRequireAdmin(), userHandler.AddUser)
-		userRoute.POST("/update", AuthMiddleware(), DevRequireAdmin(), userHandler.UpdateUser)
-		userRoute.POST("/delete", AuthMiddleware(), DevRequireAdmin(), userHandler.DeleteUser)
-		userRoute.GET("/list/page/vo", AuthMiddleware(), DevRequireAdmin(), userHandler.ListUserVoByPage)
+		userRoute.POST("/add", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), userHandler.AddUser)
+		userRoute.POST("/update", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), userHandler.UpdateUser)
+		userRoute.POST("/delete", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), userHandler.DeleteUser)
+		userRoute.GET("/list/page/vo", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), userHandler.ListUserVoByPage)
+	}
+
+	appRoute := h.Group("/app")
+	{
+		// 公开接口（无需登录）
+		appRoute.POST("/good/list/page/vo", appHandler.ListGoodApp)
+		appRoute.GET("/get/vo", middleware.AuthMiddleware(), appHandler.GetAppVo)
+
+		// 用户接口（需要登录）
+		appRoute.POST("/my/list/page/vo", middleware.AuthMiddleware(), appHandler.ListMyApp)
+		appRoute.POST("/add", middleware.AuthMiddleware(), appHandler.AddApp)
+		appRoute.POST("/update", middleware.AuthMiddleware(), appHandler.UpdateApp)
+		appRoute.POST("/delete", middleware.AuthMiddleware(), appHandler.DeleteApp)
+
+		// 管理员接口（需要管理员权限）
+		appRoute.POST("/admin/update", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), appHandler.AdminUpdateApp)
+		appRoute.POST("/admin/delete", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), appHandler.AdminDeleteApp)
+		appRoute.GET("/admin/get/vo", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), appHandler.AdminGetAppVo)
+		appRoute.POST("/admin/list/page/vo", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), appHandler.AdminListApp)
 	}
 
 	h.GET("/ping", handler.Ping)
@@ -52,41 +69,4 @@ func CustomRecoveryHandler(ctx context.Context, c *app.RequestContext, err inter
 	hlog.Errorf("panic recovered:%v\n%s", err, stack)
 	c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.SystemError.WithMessage(fmt.Sprintf("%v", err))))
 	c.Abort()
-}
-
-func AuthMiddleware() app.HandlerFunc {
-	return func(ctx context.Context, c *app.RequestContext) {
-		cookieUserID := c.Cookie("user_id")
-		cookieUserRole := c.Cookie("user_role")
-
-		if len(cookieUserID) == 0 || len(cookieUserRole) == 0 {
-			c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError.WithMessage("Login status not detected.")))
-			c.Abort()
-			return
-		}
-
-		userID, err := strconv.ParseInt(string(cookieUserID), 10, 64)
-		if err != nil || userID <= 0 {
-			c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError.WithMessage("Invalid login credentials.")))
-			c.Abort()
-			return
-		}
-
-		ctx = context.WithValue(ctx, constants.UserIDKey, userID)
-		ctx = context.WithValue(ctx, constants.UserRoleKey, string(cookieUserRole))
-		c.Next(ctx)
-	}
-}
-
-func DevRequireAdmin() app.HandlerFunc {
-	return func(ctx context.Context, c *app.RequestContext) {
-		role, ok := ctx.Value(constants.UserRoleKey).(string)
-		if !ok || role != "admin" {
-			c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotAuthError.WithMessage("Admin privileges required.")))
-			c.Abort()
-			return
-		}
-
-		c.Next(ctx)
-	}
 }

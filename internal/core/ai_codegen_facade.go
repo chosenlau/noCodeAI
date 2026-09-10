@@ -11,17 +11,17 @@ import (
 	"github.com/chosenlau/noCodeAI/internal/ai/agent"
 	aimodel "github.com/chosenlau/noCodeAI/internal/ai/ai_model"
 	"github.com/chosenlau/noCodeAI/internal/core/saver"
-	"github.com/chosenlau/noCodeAI/internal/service"
+
 	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/cloudwego/eino/schema"
 )
 
 type NoCodeAIGenFacade struct {
-	codeGenService service.INoCodeAIService
+	codeGenService INoCodeAIGenerator
 	codeSaver      *saver.CodeSaver
 }
 
-func NewNoCodeAIGenFacade(codeGenService service.INoCodeAIService,
+func NewNoCodeAIGenFacade(codeGenService INoCodeAIGenerator,
 	codeSaver *saver.CodeSaver) *NoCodeAIGenFacade {
 	return &NoCodeAIGenFacade{
 		codeGenService: codeGenService,

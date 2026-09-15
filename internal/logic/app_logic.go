@@ -9,6 +9,7 @@ import (
 	"github.com/chosenlau/noCodeAI/internal/core"
 	"github.com/chosenlau/noCodeAI/internal/dal/model"
 	"github.com/chosenlau/noCodeAI/internal/dal/query"
+	"github.com/chosenlau/noCodeAI/internal/service"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/chosenlau/noCodeAI/pkg/errorutil"
 	"github.com/chosenlau/noCodeAI/pkg/response"
@@ -18,20 +19,23 @@ import (
 )
 
 type AppService struct {
-	aiCodeGenFacade *core.NoCodeAIGenFacade // AI 代码生成门面
-	userService     UserService             // 用户服务接口
-	db              *gorm.DB                // 数据库连接
+	aiCodeGenFacade    *core.NoCodeAIGenFacade // AI 代码生成门面
+	userService        service.IUserService    // 用户服务接口
+	chatHistoryService service.IChatHistoryService
+	db                 *gorm.DB // 数据库连接
 }
 
 func NewAppService(
 	aiCodeGenFacade *core.NoCodeAIGenFacade,
-	userService UserService,
+	userService service.IUserService,
+	chatHistoryService service.IChatHistoryService,
 	db *gorm.DB,
 ) *AppService {
 	return &AppService{
-		aiCodeGenFacade: aiCodeGenFacade,
-		userService:     userService,
-		db:              db,
+		aiCodeGenFacade:    aiCodeGenFacade,
+		userService:        userService,
+		chatHistoryService: chatHistoryService,
+		db:                 db,
 	}
 }
 
@@ -127,7 +131,11 @@ func (s *AppService) DeleteApp(ctx context.Context, id int64, userId int64) (boo
 	// 3. 逻辑删除应用
 	_, err = query.App.WithContext(ctx).Where(query.App.ID.Eq(id)).Update(query.App.IsDelete, 1)
 	if err != nil {
-		return false, err
+		return false, errorutil.Success.WithMessage("failed to delete app")
+	}
+	err = s.chatHistoryService.DeleteByAppId(ctx, app.ID)
+	if err != nil {
+		return false, errorutil.Success.WithMessage("failed to delete chat history")
 	}
 	return true, nil
 }
@@ -558,6 +566,10 @@ func (s *AppService) ChatToGenCode(ctx context.Context, appId int64, message str
 		return nil, errorutil.ParamsError.WithMessage("应用代码生成类型不支持")
 	}
 
+	err = s.chatHistoryService.AddChatMessage(ctx, appId, message, enum.UserMessageType, loginUser.ID)
+	if err != nil {
+		return nil, errorutil.Success.WithMessage("failed to save chat history")
+	}
 	// 5. 调用代码生成服务
 	return s.aiCodeGenFacade.GenCodeStreamAndSave(ctx, appId, message, enum.CodeGenTypeEnum(app.CodeGenType))
 }

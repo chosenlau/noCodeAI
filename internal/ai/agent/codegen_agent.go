@@ -8,6 +8,7 @@ import (
 	"github.com/bytedance/gopkg/util/logger"
 	aimodel "github.com/chosenlau/noCodeAI/internal/ai/ai_model"
 	"github.com/chosenlau/noCodeAI/internal/ai/prompt"
+	"github.com/chosenlau/noCodeAI/internal/core/store"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
@@ -19,8 +20,8 @@ type CodeGenAgent struct {
 	agentType enum.CodeGenTypeEnum
 }
 
-func NewCodeGenAgent(chatModel ChatModelWrapperAdaptor, codeGenType enum.CodeGenTypeEnum) *CodeGenAgent {
-	baseAgent := NewBaseAgent(chatModel)
+func NewCodeGenAgent(chatModel ChatModelWrapperAdaptor, codeGenType enum.CodeGenTypeEnum, memoryStore *store.RedisMemoryStore) *CodeGenAgent {
+	baseAgent := NewBaseAgent(chatModel, memoryStore)
 	return &CodeGenAgent{
 		BaseAgent: baseAgent,
 		agentType: codeGenType,

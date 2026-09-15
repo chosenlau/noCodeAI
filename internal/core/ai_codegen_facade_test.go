@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -14,13 +15,21 @@ import (
 	"github.com/chosenlau/noCodeAI/internal/core/saver"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/cloudwego/hertz/pkg/common/test/assert"
+	"github.com/redis/go-redis/v9"
 )
 
 func TestGenCodeStreamAndSave(t *testing.T) {
 	cfg := config.InitConfig()
 	chatModel := llm.NewClaudeChatModel(cfg)
-	codeAgent := agent.NewCodeGenAgent(chatModel, enum.HtmlCodeGen)
-	saver, err := saver.NewCodeSaver("gen_code_test")
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     fmt.Sprintf("%s%d", cfg.Redis.Host, cfg.Redis.Port),
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+
+	codeAgent := agent.NewCodeGenAgentFactory(chatModel, redisClient, enum.MultiFileGen)
+
+	saver, err := saver.NewCodeSaver()
 	if err != nil {
 		panic(err)
 	}

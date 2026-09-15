@@ -12,9 +12,9 @@ type IUserService interface {
 	UserRegister(ctx context.Context, req *api.NoCodeRegisterRequest) (int64, error)
 
 	// UserLogin 用户登录
-	UserLogin(ctx context.Context, req *api.NoCodeLoginRequest) (*api.UserVo, error)
+	UserLogin(ctx context.Context, req *api.NoCodeLoginRequest) (*api.UserVo,string, error)
 
-	GetLoginUserVo(ctx context.Context, userID int64) (*api.UserVo, error)
+	GetLoginUserVo(ctx context.Context, sessionId string) (*api.UserVo, error)
 
 	HashPassword(ctx context.Context, password string) (string, error)
 

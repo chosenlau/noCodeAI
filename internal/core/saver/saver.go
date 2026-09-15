@@ -16,12 +16,12 @@ type CodeSaver struct {
 }
 
 // NewCodeSaver 初始化保存器实例，整个应用生命周期内只需要 New 一次
-func NewCodeSaver(fileName string) (*CodeSaver, error) {
+func NewCodeSaver() (*CodeSaver, error) {
 	root, err := config.GetProjectRootPath()
 	if err != nil {
 		return nil, fmt.Errorf("获取存储根目录失败: %w", err)
 	}
-	genPath:=path.Join(root,fileName)
+	genPath := path.Join(root, "saves")
 	return &CodeSaver{baseDir: genPath}, nil
 }
 

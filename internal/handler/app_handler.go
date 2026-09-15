@@ -13,6 +13,8 @@ import (
 	"github.com/chosenlau/noCodeAI/internal/api"
 	"github.com/chosenlau/noCodeAI/internal/dal/model"
 	"github.com/chosenlau/noCodeAI/internal/service"
+	"github.com/chosenlau/noCodeAI/pkg/constants"
+	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/chosenlau/noCodeAI/pkg/errorutil"
 	"github.com/chosenlau/noCodeAI/pkg/request"
 	"github.com/chosenlau/noCodeAI/pkg/response"
@@ -22,17 +24,20 @@ import (
 )
 
 type AppHandler struct {
-	appService  service.IAppService
-	userService service.IUserService
+	appService         service.IAppService
+	userService        service.IUserService
+	chatHistoryService service.IChatHistoryService
 }
 
 func NewAppHandler(
 	appService service.IAppService,
 	userService service.IUserService,
+	chatHistoryService service.IChatHistoryService,
 ) *AppHandler {
 	return &AppHandler{
-		appService:  appService,
-		userService: userService,
+		appService:         appService,
+		userService:        userService,
+		chatHistoryService: chatHistoryService,
 	}
 }
 
@@ -43,17 +48,14 @@ func (a *AppHandler) AddApp(ctx context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
 		return
 	}
-	cookieVal := c.Cookie("user_id")
-	if len(cookieVal) == 0 {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError.WithMessage("Login status not detected.")))
+	v, exists := c.Get(constants.UserVoKey)
+	if !exists {
+		// 理论上只要过了中间件，这里一定存在。属于系统防御性兜底
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.SystemError))
 		return
 	}
-	userID, err := strconv.ParseInt(string(cookieVal), 10, 64)
-	userVo, err := a.userService.GetLoginUserVo(ctx, userID)
-	if err != nil {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
-		return
-	}
+	// 2. 断言类型并返回
+	userVo := v.(*api.UserVo)
 
 	appId, err := a.appService.AddApp(ctx, req, userVo.ID)
 	if err != nil {
@@ -72,17 +74,14 @@ func (a *AppHandler) UpdateApp(ctx context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
 		return
 	}
-	cookieVal := c.Cookie("user_id")
-	if len(cookieVal) == 0 {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError.WithMessage("Login status not detected.")))
+	v, exists := c.Get(constants.UserVoKey)
+	if !exists {
+		// 理论上只要过了中间件，这里一定存在。属于系统防御性兜底
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.SystemError))
 		return
 	}
-	userID, err := strconv.ParseInt(string(cookieVal), 10, 64)
-	userVo, err := a.userService.GetLoginUserVo(ctx, userID)
-	if err != nil {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
-		return
-	}
+	// 2. 断言类型并返回
+	userVo := v.(*api.UserVo)
 	success, err := a.appService.UpdateApp(ctx, req, userVo.ID)
 	if err != nil {
 		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
@@ -98,13 +97,14 @@ func (a *AppHandler) DeleteApp(ctx context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
 		return
 	}
-	cookieVal := c.Cookie("user_id")
-	if len(cookieVal) == 0 {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError.WithMessage("Login status not detected.")))
+	v, exists := c.Get(constants.UserVoKey)
+	if !exists {
+		// 理论上只要过了中间件，这里一定存在。属于系统防御性兜底
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.SystemError))
 		return
 	}
-	userID, err := strconv.ParseInt(string(cookieVal), 10, 64)
-	userVo, err := a.userService.GetLoginUserVo(ctx, userID)
+	// 2. 断言类型并返回
+	userVo := v.(*api.UserVo)
 	if err != nil {
 		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
 		return
@@ -127,17 +127,14 @@ func (a *AppHandler) GetAppVo(ctx context.Context, c *app.RequestContext) {
 	idInt64, _ := strconv.ParseInt(id, 10, 64)
 
 	// 2. 获取当前登录用户
-	cookieVal := c.Cookie("user_id")
-	if len(cookieVal) == 0 {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError.WithMessage("Login status not detected.")))
+	v, exists := c.Get(constants.UserVoKey)
+	if !exists {
+		// 理论上只要过了中间件，这里一定存在。属于系统防御性兜底
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.SystemError))
 		return
 	}
-	userID, err := strconv.ParseInt(string(cookieVal), 10, 64)
-	userVo, err := a.userService.GetLoginUserVo(ctx, userID)
-	if err != nil {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
-		return
-	}
+	// 2. 断言类型并返回
+	userVo := v.(*api.UserVo)
 
 	// 3. 调用服务层获取应用详情
 	appVo, err := a.appService.GetAppVo(ctx, idInt64, userVo.ID)
@@ -157,17 +154,14 @@ func (a *AppHandler) ListMyApp(ctx context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
 		return
 	}
-	cookieVal := c.Cookie("user_id")
-	if len(cookieVal) == 0 {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError.WithMessage("Login status not detected.")))
+	v, exists := c.Get(constants.UserVoKey)
+	if !exists {
+		// 理论上只要过了中间件，这里一定存在。属于系统防御性兜底
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.SystemError))
 		return
 	}
-	userID, err := strconv.ParseInt(string(cookieVal), 10, 64)
-	userVo, err := a.userService.GetLoginUserVo(ctx, userID)
-	if err != nil {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
-		return
-	}
+	// 2. 断言类型并返回
+	userVo := v.(*api.UserVo)
 	pageResponse, err := a.appService.ListMyApp(ctx, req, userVo.ID)
 	if err != nil {
 		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
@@ -276,20 +270,14 @@ func (a *AppHandler) ChatToGenCode(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// 3. 获取当前登录用户
-	cookieVal := c.Cookie("user_id")
-	if len(cookieVal) == 0 {
-		_ = w.WriteEvent(lastEventID, "error", []byte("Login status not detected."))
-		_ = w.WriteEvent(lastEventID, "done", []byte{1})
+	v, exists := c.Get(constants.UserVoKey)
+	if !exists {
+		// 理论上只要过了中间件，这里一定存在。属于系统防御性兜底
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.SystemError))
 		return
 	}
-	userID, err := strconv.ParseInt(string(cookieVal), 10, 64)
-	userVo, err := a.userService.GetLoginUserVo(ctx, userID)
-	if err != nil {
-		_ = w.WriteEvent(lastEventID, "error", []byte(fmt.Sprintf("%v", err)))
-		_ = w.WriteEvent(lastEventID, "done", []byte{1})
-		return
-	}
-
+	// 2. 断言类型并返回
+	userVo := v.(*api.UserVo)
 	// 4. 转换应用ID
 	appId, err := strconv.ParseInt(appIdStr, 10, 64)
 	if err != nil {
@@ -346,7 +334,10 @@ func (a *AppHandler) ChatToGenCode(ctx context.Context, c *app.RequestContext) {
 			return
 		}
 	}
-
+	err = a.chatHistoryService.AddChatMessage(ctx, appId, aiResponseBuilder.String(), enum.AIMessageType, userVo.ID)
+	if err != nil {
+		logger.Errorf("保存对话历史失败: %v\n", err)
+	}
 	// 8. 发送完成事件
 	_ = w.WriteEvent(lastEventID, "done", []byte{1})
 }

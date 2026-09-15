@@ -16,6 +16,7 @@ import (
 type Config struct {
 	Server   ServerConfig   `mapstructure:"server"`
 	Database DatabaseConfig `mapstructure:"database"`
+	Redis    RedisConfig `mapstructure:"redis"`
 	AI       AIConfig       `mapstructure:"ai"`
 }
 
@@ -31,10 +32,18 @@ type DatabaseConfig struct {
 	Database string `mapstructure:"database"`
 }
 
+type RedisConfig struct {
+	Host     string `yaml:"host" mapstructure:"host"`
+	Port     int    `yaml:"port" mapstructure:"port"`
+	Password string `yaml:"password" mapstructure:"password"`
+	DB       int    `yaml:"db" mapstructure:"db"`
+}
+
 type AIConfig struct {
 	APIKey  string `mapstructure:"api_key"`
 	Model   string `mapstructure:"model"`
 	BaseURL string `mapstructure:"base_url"`
+	Provider string `mapstructure:"provider"`
 }
 
 var (

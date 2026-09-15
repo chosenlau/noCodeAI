@@ -16,30 +16,34 @@ import (
 )
 
 var (
-	Q    = new(Query)
-	App  *app
-	User *user
+	Q           = new(Query)
+	App         *app
+	ChatHistory *chatHistory
+	User        *user
 )
 
 func SetDefault(db *gorm.DB, opts ...gen.DOOption) {
 	*Q = *Use(db, opts...)
 	App = &Q.App
+	ChatHistory = &Q.ChatHistory
 	User = &Q.User
 }
 
 func Use(db *gorm.DB, opts ...gen.DOOption) *Query {
 	return &Query{
-		db:   db,
-		App:  newApp(db, opts...),
-		User: newUser(db, opts...),
+		db:          db,
+		App:         newApp(db, opts...),
+		ChatHistory: newChatHistory(db, opts...),
+		User:        newUser(db, opts...),
 	}
 }
 
 type Query struct {
 	db *gorm.DB
 
-	App  app
-	User user
+	App         app
+	ChatHistory chatHistory
+	User        user
 }
 
 func (q *Query) Available() bool { return q.db != nil }
@@ -48,9 +52,10 @@ func (q *Query) UnderlyingDB() *gorm.DB { return q.db }
 
 func (q *Query) clone(db *gorm.DB) *Query {
 	return &Query{
-		db:   db,
-		App:  q.App.clone(db),
-		User: q.User.clone(db),
+		db:          db,
+		App:         q.App.clone(db),
+		ChatHistory: q.ChatHistory.clone(db),
+		User:        q.User.clone(db),
 	}
 }
 
@@ -64,21 +69,24 @@ func (q *Query) WriteDB() *Query {
 
 func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 	return &Query{
-		db:   db,
-		App:  q.App.replaceDB(db),
-		User: q.User.replaceDB(db),
+		db:          db,
+		App:         q.App.replaceDB(db),
+		ChatHistory: q.ChatHistory.replaceDB(db),
+		User:        q.User.replaceDB(db),
 	}
 }
 
 type queryCtx struct {
-	App  IAppDo
-	User IUserDo
+	App         IAppDo
+	ChatHistory IChatHistoryDo
+	User        IUserDo
 }
 
 func (q *Query) WithContext(ctx context.Context) *queryCtx {
 	return &queryCtx{
-		App:  q.App.WithContext(ctx),
-		User: q.User.WithContext(ctx),
+		App:         q.App.WithContext(ctx),
+		ChatHistory: q.ChatHistory.WithContext(ctx),
+		User:        q.User.WithContext(ctx),
 	}
 }
 

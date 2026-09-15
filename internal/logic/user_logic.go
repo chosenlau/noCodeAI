@@ -2,8 +2,12 @@ package logic
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"strings"
+	"time"
 
 	"github.com/chosenlau/noCodeAI/internal/api"
 	"github.com/chosenlau/noCodeAI/internal/dal/model"
@@ -12,6 +16,7 @@ import (
 	"github.com/chosenlau/noCodeAI/pkg/errorutil"
 	"github.com/chosenlau/noCodeAI/pkg/response"
 	"github.com/chosenlau/noCodeAI/pkg/snowflake"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gen"
 	"gorm.io/gen/field"
@@ -19,11 +24,15 @@ import (
 )
 
 type UserService struct {
-	db *gorm.DB
+	db          *gorm.DB
+	redisClient *redis.Client
 }
 
-func NewUserService(db *gorm.DB) *UserService {
-	return &UserService{db: db}
+func NewUserService(db *gorm.DB, redisClient *redis.Client) *UserService {
+	return &UserService{
+		db:          db,
+		redisClient: redisClient,
+	}
 }
 func (s *UserService) HashPassword(ctx context.Context, password string) (string, error) {
 	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -80,22 +89,25 @@ func (s *UserService) UserRegister(ctx context.Context, req *api.NoCodeRegisterR
 	return newUser.ID, nil
 }
 
-func (s *UserService) UserLogin(ctx context.Context, req *api.NoCodeLoginRequest) (*api.UserVo, error) {
+func (s *UserService) UserLogin(ctx context.Context, req *api.NoCodeLoginRequest) (*api.UserVo, string, error) {
 	if req.UserAccount == "" || req.UserPassword == "" {
-		return nil, errorutil.ParamsError
+		return nil, "", errorutil.ParamsError
 	}
 
 	q := query.Use(s.db)
 	user, err := q.User.WithContext(ctx).Where(q.User.UserAccount.Eq(req.UserAccount)).First()
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errorutil.ParamsError
+			return nil, "", errorutil.ParamsError
 		}
-		return nil, errorutil.SystemError.WithMessage("Failed to query user.")
+		return nil, "", errorutil.SystemError.WithMessage("Failed to query user.")
 	}
 	if err := s.CheckPassword(ctx, req.UserPassword, user.UserPassword); err != nil {
-		return nil, errorutil.ParamsError.WithMessage("Incorrect password.")
+		return nil, "", errorutil.ParamsError.WithMessage("Incorrect password.")
 	}
+	// 4. 生成 sessionId
+	sessionId := fmt.Sprintf("session:%d", time.Now().UnixNano())
+
 	userVo := api.UserVo{
 		ID:          user.ID,
 		UserAccount: user.UserAccount,
@@ -106,30 +118,51 @@ func (s *UserService) UserLogin(ctx context.Context, req *api.NoCodeLoginRequest
 		CreateTime:  user.CreateTime,
 		UpdateTime:  user.UpdateTime,
 	}
-	return &userVo, nil
+	// 关键步骤：将用户信息转换为json并存入Redis
+	userVoJson, err := json.Marshal(userVo)
+	if err != nil {
+		return nil, "", err
+	}
+	err = s.redisClient.Set(ctx, sessionId, userVoJson, 24*time.Hour).Err()
+	if err != nil {
+		return nil, "", err
+	}
+
+	return &userVo, sessionId, nil
 }
 
-func (s *UserService) GetLoginUserVo(ctx context.Context, userID int64) (*api.UserVo, error) {
-	if userID <= 0 {
-		return nil, errorutil.ParamsError
+func (s *UserService) GetLoginUserVo(ctx context.Context, sessionId string) (*api.UserVo, error) {
+	decodedSessionId, err := url.QueryUnescape(string(sessionId))
+	if err != nil {
+		return nil, err
+	}
+	// 关键步骤：从Redis获取用户信息
+	userJson, err := s.redisClient.Get(ctx, decodedSessionId).Result()
+	if err != nil {
+		return nil, errorutil.ParamsError.WithMessage("登录已过期，请重新登录")
+	}
+	var userVo api.UserVo
+	err = json.Unmarshal([]byte(userJson), &userVo)
+	if err != nil {
+		return nil, err
 	}
 	q := query.Use(s.db)
-	user, err := q.User.WithContext(ctx).Where(q.User.ID.Eq(userID), q.User.IsDelete.Eq(0)).First()
+	_, err = q.User.WithContext(ctx).Where(query.User.ID.Eq(userVo.ID), query.User.IsDelete.Eq(0)).First()
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errorutil.ParamsError
+			return nil, errorutil.ParamsError.WithMessage("failed to verify user")
 		}
 		return nil, errorutil.SystemError.WithMessage("Failed to query user.")
 	}
-	userVo := api.UserVo{
-		ID:          user.ID,
-		UserAccount: user.UserAccount,
-		UserName:    user.UserName,
-		UserAvatar:  user.UserAvatar,
-		UserProfile: user.UserProfile,
-		UserRole:    user.UserRole,
-		CreateTime:  user.CreateTime,
-		UpdateTime:  user.UpdateTime,
+	userVo = api.UserVo{
+		ID:          userVo.ID,
+		UserAccount: userVo.UserAccount,
+		UserName:    userVo.UserName,
+		UserAvatar:  userVo.UserAvatar,
+		UserProfile: userVo.UserProfile,
+		UserRole:    userVo.UserRole,
+		CreateTime:  userVo.CreateTime,
+		UpdateTime:  userVo.UpdateTime,
 	}
 	return &userVo, nil
 }

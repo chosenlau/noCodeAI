@@ -17,14 +17,14 @@ import (
 )
 
 type NoCodeAIGenFacade struct {
-	codeGenService INoCodeAIGenerator
+	codeGenFactory *agent.CodeGenAgentFactory
 	codeSaver      *saver.CodeSaver
 }
 
-func NewNoCodeAIGenFacade(codeGenService INoCodeAIGenerator,
+func NewNoCodeAIGenFacade(codeGenFactory *agent.CodeGenAgentFactory,
 	codeSaver *saver.CodeSaver) *NoCodeAIGenFacade {
 	return &NoCodeAIGenFacade{
-		codeGenService: codeGenService,
+		codeGenFactory: codeGenFactory,
 		codeSaver:      codeSaver,
 	}
 }
@@ -82,15 +82,19 @@ func (y *NoCodeAIGenFacade) processCodeStream(respStream *schema.StreamReader[*s
 }
 
 func (y *NoCodeAIGenFacade) GenCodeStreamAndSave(ctx context.Context, appID int64, userMessage string, typeStr enum.CodeGenTypeEnum) (*schema.StreamReader[*schema.Message], error) {
+	genAgent, err := y.codeGenFactory.GetCodeGenAgent(ctx,appID, typeStr)
+	if err != nil {
+		return nil, err
+	}
 	switch typeStr {
 	case enum.HtmlCodeGen:
-		streamResp, err := y.codeGenService.GenerateHtmlCodeStream(ctx, userMessage)
+		streamResp, err := genAgent.GenerateHtmlCodeStream(ctx, userMessage)
 		if err != nil {
 			return nil, err
 		}
 		return y.processCodeStream(streamResp, appID, typeStr)
 	case enum.MultiFileGen:
-		streamResp, err := y.codeGenService.GenerateMultiFileCodeStream(ctx, userMessage)
+		streamResp, err := genAgent.GenerateMultiFileCodeStream(ctx, userMessage)
 		if err != nil {
 			return nil, err
 		}

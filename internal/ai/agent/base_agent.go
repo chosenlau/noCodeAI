@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/bytedance/gopkg/util/logger"
+	"github.com/chosenlau/noCodeAI/internal/core/store"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/prompt"
@@ -19,14 +20,16 @@ type ChatModelWrapperAdaptor interface {
 }
 
 type BaseAgent struct {
-	model     model.ToolCallingChatModel
-	modelName string
+	model       model.ToolCallingChatModel
+	modelName   string
+	memoryStore *store.RedisMemoryStore
 }
 
-func NewBaseAgent(model ChatModelWrapperAdaptor) *BaseAgent {
+func NewBaseAgent(model ChatModelWrapperAdaptor, memoryStore *store.RedisMemoryStore) *BaseAgent {
 	return &BaseAgent{
-		model:     model.GetChatModel(),
-		modelName: model.GetModelName(),
+		model:       model.GetChatModel(),
+		modelName:   model.GetModelName(),
+		memoryStore: memoryStore,
 	}
 }
 
@@ -95,9 +98,18 @@ func (a *BaseAgent) Generate(ctx context.Context, userMessage string, chatTempla
 }
 
 func (a *BaseAgent) GenerateStream(ctx context.Context, userMessage string, chatTemplate prompt.ChatTemplate, adkAgent *adk.ChatModelAgent) (*schema.StreamReader[*schema.Message], error) {
+	historyMessage, err := a.memoryStore.GetMessages(ctx)
+	if err != nil {
+		return nil, err
+	}
 	format, err := chatTemplate.Format(ctx, map[string]any{
 		"content": userMessage,
+		"history": historyMessage,
 	})
+	if err != nil {
+		return nil, err
+	}
+	err = a.memoryStore.AppendMessage(ctx, schema.UserMessage(userMessage))
 	if err != nil {
 		return nil, err
 	}
@@ -143,6 +155,10 @@ func (a *BaseAgent) GenerateStream(ctx context.Context, userMessage string, chat
 					}
 				}
 			}
+		}
+		err := a.memoryStore.AppendMessage(ctx, schema.AssistantMessage(fullContent, nil))
+		if err != nil {
+			logger.Errorf("保存对话记忆失败: %v", err)
 		}
 	}()
 

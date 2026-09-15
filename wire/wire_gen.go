@@ -9,8 +9,13 @@ package wire
 import (
 	"fmt"
 	"github.com/chosenlau/noCodeAI/config"
+	"github.com/chosenlau/noCodeAI/internal/ai/agent"
+	"github.com/chosenlau/noCodeAI/internal/ai/llm"
+	"github.com/chosenlau/noCodeAI/internal/core"
+	"github.com/chosenlau/noCodeAI/internal/core/saver"
 	"github.com/chosenlau/noCodeAI/internal/dal"
 	"github.com/chosenlau/noCodeAI/internal/handler"
+	"github.com/chosenlau/noCodeAI/internal/logic"
 	"github.com/chosenlau/noCodeAI/internal/router"
 	"github.com/chosenlau/noCodeAI/internal/service"
 	"github.com/cloudwego/hertz/pkg/app/server"
@@ -22,25 +27,55 @@ import (
 func InitializeApp() (*server.Hertz, error) {
 	configConfig := config.InitConfig()
 	db := dal.InitDB(configConfig)
-	iUserService := service.NewUserService(db)
-	userHandler := handler.NewUserHandler(iUserService)
-	hertz := initServer(configConfig, userHandler)
+	client := dal.InitRedis(configConfig)
+	userService := logic.NewUserService(db, client)
+	userHandler := handler.NewUserHandler(userService)
+	chatModelWrapperAdaptor, err := ProvideChatModel(configConfig)
+	if err != nil {
+		return nil, err
+	}
+	chatHistoryService := logic.NewChatHistoryService(db)
+	codeGenAgentFactory := agent.NewCodeGenAgentFactory(chatModelWrapperAdaptor, client, chatHistoryService)
+	codeSaver, err := saver.NewCodeSaver()
+	if err != nil {
+		return nil, err
+	}
+	noCodeAIGenFacade := core.NewNoCodeAIGenFacade(codeGenAgentFactory, codeSaver)
+	appService := logic.NewAppService(noCodeAIGenFacade, userService, chatHistoryService, db)
+	appHandler := handler.NewAppHandler(appService, userService, chatHistoryService)
+	chatHistoryHandler := handler.NewChatHistoryHandler(chatHistoryService, userService)
+	hertz := initServer(configConfig, userHandler, appHandler, chatHistoryHandler, userService)
 	return hertz, nil
 }
 
 // wire.go:
 
+func ProvideChatModel(cfg *config.Config) (agent.ChatModelWrapperAdaptor, error) {
+	switch cfg.AI.Provider {
+	case "claude":
+		return llm.NewClaudeChatModel(cfg), nil
+	case "openai":
+		return llm.NewOpenAIChatModel(cfg), nil
+	default:
+		return nil, fmt.Errorf("unsupported llm provider: %s", cfg.AI.Provider)
+	}
+}
+
 var configSet = wire.NewSet(config.InitConfig)
 
-var dbSet = wire.NewSet(dal.InitDB)
+var dbSet = wire.NewSet(dal.InitDB, dal.InitRedis)
 
-var serviceSet = wire.NewSet(service.NewUserService)
+var serviceSet = wire.NewSet(logic.NewAppService, wire.Bind(new(service.IAppService), new(*logic.AppService)), logic.NewUserService, wire.Bind(new(service.IUserService), new(*logic.UserService)), logic.NewChatHistoryService, wire.Bind(new(service.IChatHistoryService), new(*logic.ChatHistoryService)))
 
-var handlerSet = wire.NewSet(handler.NewUserHandler)
+var handlerSet = wire.NewSet(handler.NewUserHandler, handler.NewAppHandler, handler.NewChatHistoryHandler)
 
-func initServer(cfg *config.Config, userHandler *handler.UserHandler) *server.Hertz {
+var llmSet = wire.NewSet(
+	ProvideChatModel,
+)
+
+func initServer(cfg *config.Config, userHandler *handler.UserHandler, appHandler *handler.AppHandler, chatHistoryHandler *handler.ChatHistoryHandler, userService service.IUserService) *server.Hertz {
 
 	h := server.Default(server.WithHostPorts(fmt.Sprintf(":%d", cfg.Server.Port)), server.WithBasePath(cfg.Server.ContextPath))
-	router.RegisterRoutes(h, userHandler)
+	router.RegisterRoutes(h, userHandler, appHandler, chatHistoryHandler, userService)
 	return h
 }

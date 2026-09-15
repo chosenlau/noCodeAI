@@ -2,10 +2,10 @@ package handler
 
 import (
 	"context"
-	"strconv"
 
 	"github.com/chosenlau/noCodeAI/internal/api"
 	"github.com/chosenlau/noCodeAI/internal/service"
+	"github.com/chosenlau/noCodeAI/pkg/constants"
 	"github.com/chosenlau/noCodeAI/pkg/errorutil"
 	"github.com/chosenlau/noCodeAI/pkg/response"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -46,42 +46,26 @@ func (h *UserHandler) UserLogin(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	userVo, err := h.userService.UserLogin(ctx, req)
+	userVo, sessionId, err := h.userService.UserLogin(ctx, req)
 	if err != nil {
 		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
 		return
 	}
-	// TODO(auth): 当前为开发阶段简易实现，生产环境需迁移至 JWT 或服务端 Session 机制，防止伪造 user_id
-
-	c.SetCookie("user_id", strconv.FormatInt(userVo.ID, 10),
-		86400, "/", "", protocol.CookieSameSiteLaxMode, false, true)
-	c.SetCookie("user_role", userVo.UserRole,
+	c.SetCookie(constants.UserLoginState, sessionId,
 		86400, "/", "", protocol.CookieSameSiteLaxMode, false, true)
 
 	c.JSON(consts.StatusOK, response.NewSuccessResponse[*api.UserVo](userVo))
 }
 func (h *UserHandler) GetLoginUserVo(ctx context.Context, c *app.RequestContext) {
-	cookieVal := c.Cookie("user_id")
-	if len(cookieVal) == 0 {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError.WithMessage("Login status not detected.")))
+	v, exist := c.Get(constants.UserVoKey)
+	if !exist {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](
+			errorutil.NotLoginError.WithMessage("尚未登录或登录已过期"),
+		))
+		c.Abort()
 		return
 	}
-
-	userID, err := strconv.ParseInt(string(cookieVal), 10, 64)
-	if err != nil || userID <= 0 {
-		// Clear the invalid or corrupted cookie
-		h.clearUserCookie(c)
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError.WithMessage("Invalid login credentials, please log in again.")))
-		return
-	}
-
-	userVo, err := h.userService.GetLoginUserVo(ctx, userID)
-	if err != nil {
-		// Clear stale credentials if the user no longer exists or query fails
-		h.clearUserCookie(c)
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
-		return
-	}
+	userVo := v.(*api.UserVo)
 
 	c.JSON(consts.StatusOK, response.NewSuccessResponse(userVo))
 }

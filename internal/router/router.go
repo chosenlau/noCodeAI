@@ -7,6 +7,7 @@ import (
 
 	"github.com/chosenlau/noCodeAI/internal/handler"
 	"github.com/chosenlau/noCodeAI/internal/middleware"
+	"github.com/chosenlau/noCodeAI/internal/service"
 	"github.com/chosenlau/noCodeAI/pkg/errorutil"
 	"github.com/chosenlau/noCodeAI/pkg/response"
 	"github.com/cloudwego/hertz/pkg/app"
@@ -17,7 +18,7 @@ import (
 	"github.com/hertz-contrib/cors"
 )
 
-func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandler *handler.AppHandler) {
+func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandler *handler.AppHandler, chatHistoryHandler *handler.ChatHistoryHandler, userService service.IUserService) {
 	h.Use(cors.New(cors.Config{
 		AllowAllOrigins:  true,
 		AllowMethods:     []string{"*"},
@@ -34,34 +35,41 @@ func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandle
 		userRoute.POST("/login", userHandler.UserLogin)
 		userRoute.GET("/get/vo", userHandler.GetUserByID)
 
-		userRoute.GET("/get/login", middleware.AuthMiddleware(), userHandler.GetLoginUserVo)
-		userRoute.GET("/logout", middleware.AuthMiddleware(), userHandler.UserLogout)
+		userRoute.GET("/get/login", middleware.AuthMiddleware(userService), userHandler.GetLoginUserVo)
+		userRoute.GET("/logout", middleware.AuthMiddleware(userService), userHandler.UserLogout)
 
-		userRoute.POST("/add", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), userHandler.AddUser)
-		userRoute.POST("/update", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), userHandler.UpdateUser)
-		userRoute.POST("/delete", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), userHandler.DeleteUser)
-		userRoute.GET("/list/page/vo", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), userHandler.ListUserVoByPage)
+		userRoute.POST("/add", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), userHandler.AddUser)
+		userRoute.POST("/update", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), userHandler.UpdateUser)
+		userRoute.POST("/delete", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), userHandler.DeleteUser)
+		userRoute.GET("/list/page/vo", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), userHandler.ListUserVoByPage)
 	}
 
 	appRoute := h.Group("/app")
 	{
 		// 公开接口（无需登录）
 		appRoute.POST("/good/list/page/vo", appHandler.ListGoodApp)
-		appRoute.GET("/get/vo", middleware.AuthMiddleware(), appHandler.GetAppVo)
+		appRoute.GET("/get/vo", middleware.AuthMiddleware(userService), appHandler.GetAppVo)
 
 		// 用户接口（需要登录）
-		appRoute.POST("/my/list/page/vo", middleware.AuthMiddleware(), appHandler.ListMyApp)
-		appRoute.POST("/add", middleware.AuthMiddleware(), appHandler.AddApp)
-		appRoute.POST("/update", middleware.AuthMiddleware(), appHandler.UpdateApp)
-		appRoute.POST("/delete", middleware.AuthMiddleware(), appHandler.DeleteApp)
+		appRoute.POST("/my/list/page/vo", middleware.AuthMiddleware(userService), appHandler.ListMyApp)
+		appRoute.POST("/add", middleware.AuthMiddleware(userService), appHandler.AddApp)
+		appRoute.POST("/update", middleware.AuthMiddleware(userService), appHandler.UpdateApp)
+		appRoute.POST("/delete", middleware.AuthMiddleware(userService), appHandler.DeleteApp)
 
 		// 管理员接口（需要管理员权限）
-		appRoute.POST("/admin/update", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), appHandler.AdminUpdateApp)
-		appRoute.POST("/admin/delete", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), appHandler.AdminDeleteApp)
-		appRoute.GET("/admin/get/vo", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), appHandler.AdminGetAppVo)
-		appRoute.POST("/admin/list/page/vo", middleware.AuthMiddleware(), middleware.DevRequireAdmin(), appHandler.AdminListApp)
+		appRoute.POST("/admin/update", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), appHandler.AdminUpdateApp)
+		appRoute.POST("/admin/delete", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), appHandler.AdminDeleteApp)
+		appRoute.GET("/admin/get/vo", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), appHandler.AdminGetAppVo)
+		appRoute.POST("/admin/list/page/vo", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), appHandler.AdminListApp)
 	}
 
+	chatHistoryRoute := h.Group("/chatHistory")
+	{
+		// 需要管理员权限的接口
+		chatHistoryRoute.POST("/admin/list/page/vo", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), chatHistoryHandler.ListAllChatHistoryByPageForAdmin)
+
+		chatHistoryRoute.GET("/app/:appId", middleware.AuthMiddleware(userService), chatHistoryHandler.ListAppChatHistory)
+	}
 	h.GET("/ping", handler.Ping)
 }
 

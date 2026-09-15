@@ -1,8 +1,8 @@
 package constants
 
-type contextKey string
+const UserLoginState = "user_login"
 
-const (
-	UserIDKey   contextKey = "current_user_id"
-	UserRoleKey contextKey = "current_user_role"
+const(
+	UserVoKey  = "user_Vo"
+
 )

@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>[DEBUG-ws01] White Screen Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #0f0; }
+    .log { margin: 5px 0; padding: 5px; background: #000; border-left: 3px solid #0f0; }
+    .error { border-left-color: #f00; color: #f00; }
+    .success { border-left-color: #0f0; color: #0f0; }
+    button { padding: 10px; margin: 10px 0; background: #0f0; border: none; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h1>White Screen Bug - Phase 1 Feedback Loop</h1>
+  <button onclick="testEventSource()">Test EventSource</button>
+  <button onclick="testWithFetch()">Test with Fetch</button>
+  <button onclick="clearLogs()">Clear Logs</button>
+  <div id="logs"></div>
+
+  <script>
+    const logs = document.getElementById('logs');
+
+    function log(msg, isError = false) {
+      const div = document.createElement('div');
+      div.className = 'log' + (isError ? ' error' : '');
+      div.textContent = `[${new Date().toISOString().substr(11, 12)}] ${msg}`;
+      logs.appendChild(div);
+      console.log(msg);
+    }
+
+    function clearLogs() {
+      logs.innerHTML = '';
+    }
+
+    // Capture all errors
+    window.addEventListener('error', e => {
+      log(`[DEBUG-ws02] UNCAUGHT ERROR: ${e.message} at ${e.filename}:${e.lineno}`, true);
+    });
+
+    async function testEventSource() {
+      log('[DEBUG-ws03] Starting EventSource test...');
+
+      const appId = '637489081953026049';
+      const message = 'test message';
+      const url = `/app/chat?appId=${appId}&message=${encodeURIComponent(message)}`;
+
+      log(`[DEBUG-ws04] URL: ${url}`);
+
+      try {
+        const es = new EventSource(url, { withCredentials: true });
+        log('[DEBUG-ws05] ✓ EventSource created');
+
+        let messageCount = 0;
+        let hasData = false;
+
+        es.onopen = () => {
+          log('[DEBUG-ws06] ✓ Connection opened', false);
+        };
+
+        es.onmessage = (event) => {
+          messageCount++;
+          log(`[DEBUG-ws07] Message #${messageCount}: ${event.data.substring(0, 100)}`);
+
+          try {
+            const parsed = JSON.parse(event.data);
+            if (parsed.d) {
+              hasData = true;
+              log(`[DEBUG-ws08] ✓ Has data field: ${parsed.d.substring(0, 50)}`);
+            }
+          } catch (e) {
+            log(`[DEBUG-ws09] Failed to parse: ${e.message}`, true);
+          }
+        };
+
+        es.onerror = (event) => {
+          log(`[DEBUG-ws10] ⚠ EventSource error`, true);
+          log(`[DEBUG-ws11] ReadyState: ${es.readyState} (0=CONNECTING, 1=OPEN, 2=CLOSED)`);
+          es.close();
+        };
+
+        es.addEventListener('done', () => {
+          log('[DEBUG-ws12] ✓ Received "done" event');
+          log(`[DEBUG-ws13] Total messages: ${messageCount}`);
+          log(`[DEBUG-ws14] Had data: ${hasData}`);
+          es.close();
+        });
+
+        // Timeout
+        setTimeout(() => {
+          if (es.readyState !== 2) {
+            log('[DEBUG-ws15] Timeout - closing connection');
+            es.close();
+          }
+        }, 10000);
+
+      } catch (error) {
+        log(`[DEBUG-ws16] EXCEPTION: ${error.message}`, true);
+        log(`[DEBUG-ws17] Stack: ${error.stack}`, true);
+      }
+    }
+
+    async function testWithFetch() {
+      log('[DEBUG-ws18] Testing with fetch...');
+
+      try {
+        const response = await fetch('/app/chat?appId=637489081953026049&message=test', {
+          credentials: 'include'
+        });
+
+        log(`[DEBUG-ws19] Status: ${response.status}`);
+        log(`[DEBUG-ws20] Content-Type: ${response.headers.get('content-type')}`);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let chunks = 0;
+
+        while (true) {
+          const {done, value} = await reader.read();
+          if (done) break;
+          chunks++;
+          const text = decoder.decode(value);
+          log(`[DEBUG-ws21] Chunk #${chunks}: ${text.substring(0, 100)}`);
+        }
+
+        log(`[DEBUG-ws22] ✓ Received ${chunks} chunks`);
+
+      } catch (error) {
+        log(`[DEBUG-ws23] FETCH ERROR: ${error.message}`, true);
+      }
+    }
+
+    // Auto-run on load
+    log('[DEBUG-ws24] Page loaded. Click button to test.');
+    log('[DEBUG-ws25] Make sure backend is running on :8123');
+  </script>
+</body>
+</html>

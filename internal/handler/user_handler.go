@@ -54,7 +54,7 @@ func (h *UserHandler) UserLogin(ctx context.Context, c *app.RequestContext) {
 	c.SetCookie(constants.UserLoginState, sessionId,
 		86400, "/", "", protocol.CookieSameSiteLaxMode, false, true)
 
-	c.JSON(consts.StatusOK, response.NewSuccessResponse[*api.UserVo](userVo))
+	c.JSON(consts.StatusOK, response.NewSuccessResponse(userVo))
 }
 func (h *UserHandler) GetLoginUserVo(ctx context.Context, c *app.RequestContext) {
 	v, exist := c.Get(constants.UserVoKey)
@@ -71,13 +71,30 @@ func (h *UserHandler) GetLoginUserVo(ctx context.Context, c *app.RequestContext)
 }
 
 func (h *UserHandler) UserLogout(ctx context.Context, c *app.RequestContext) {
+	sessionBytes := c.Request.Header.Cookie(constants.UserLoginState)
+	sessionId := string(sessionBytes)
+
+	var userId int64
+	if v, exist := c.Get(constants.UserVoKey); exist {
+		if userVo, ok := v.(*api.UserVo); ok {
+			userId = userVo.ID
+		}
+	}
+
+	if sessionId != "" {
+		if err := h.userService.UserLogout(ctx, sessionId, userId); err != nil {
+			h.clearUserCookie(c)
+			c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
+			return
+		}
+	}
+
 	h.clearUserCookie(c)
 	c.JSON(consts.StatusOK, response.NewSuccessResponse[any](true))
 }
 func (h *UserHandler) clearUserCookie(c *app.RequestContext) {
 	// Setting MaxAge to -1 instructs the browser to immediately delete the cookie
-	c.SetCookie("user_id", "", -1, "/", "", protocol.CookieSameSiteLaxMode, false, true)
-	c.SetCookie("user_role", "", -1, "/", "", protocol.CookieSameSiteLaxMode, false, true)
+	c.SetCookie(constants.UserLoginState, "", -1, "/", "", protocol.CookieSameSiteLaxMode, false, true)
 }
 func (h *UserHandler) AddUser(ctx context.Context, c *app.RequestContext) {
 	req := &api.NoCodeUserAddRequest{}

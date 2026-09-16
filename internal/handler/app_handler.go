@@ -297,9 +297,20 @@ func (a *AppHandler) ChatToGenCode(ctx context.Context, c *app.RequestContext) {
 
 	// 6. 流式返回数据
 	var aiResponseBuilder strings.Builder
+	aiResponseSaved := false
+	saveAIResponse := func() {
+		if aiResponseSaved || aiResponseBuilder.Len() == 0 {
+			return
+		}
+		aiResponseSaved = true
+		if err := a.chatHistoryService.AddChatMessage(ctx, appId, aiResponseBuilder.String(), enum.AIMessageType, userVo.ID); err != nil {
+			logger.Errorf("保存对话历史失败: %v\n", err)
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
+			saveAIResponse()
 			logger.Info("连接中断")
 			_ = w.WriteEvent(lastEventID, "done", []byte{1})
 			return
@@ -313,6 +324,7 @@ func (a *AppHandler) ChatToGenCode(ctx context.Context, c *app.RequestContext) {
 		if err != nil {
 			_ = w.WriteEvent(lastEventID, "error", []byte(fmt.Sprintf("%v", err)))
 			_ = w.WriteEvent(lastEventID, "done", []byte{1})
+			saveAIResponse()
 			return
 		}
 		aiResponseBuilder.WriteString(chunk.Content)
@@ -331,13 +343,11 @@ func (a *AppHandler) ChatToGenCode(ctx context.Context, c *app.RequestContext) {
 		if err != nil {
 			_ = w.WriteEvent(lastEventID, "error", []byte(fmt.Sprintf("%v", err)))
 			_ = w.WriteEvent(lastEventID, "done", []byte{1})
+			saveAIResponse()
 			return
 		}
 	}
-	err = a.chatHistoryService.AddChatMessage(ctx, appId, aiResponseBuilder.String(), enum.AIMessageType, userVo.ID)
-	if err != nil {
-		logger.Errorf("保存对话历史失败: %v\n", err)
-	}
+	saveAIResponse()
 	// 8. 发送完成事件
 	_ = w.WriteEvent(lastEventID, "done", []byte{1})
 }

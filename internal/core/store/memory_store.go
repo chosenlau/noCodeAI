@@ -36,11 +36,23 @@ func NewRedisMemoryStore(redisClient *redis.Client, memoryId string, maxMemoryMe
 
 func (r *RedisMemoryStore) GetMessages(ctx context.Context) ([]*schema.Message, error) {
 	key := fmt.Sprintf("memory:%s", r.memoryId)
-	data, err := r.redisClient.Get(ctx, key).Bytes()
+	items, err := r.redisClient.LRange(ctx, key, 0, -1).Result()
 	if err != nil {
 		return nil, err
 	}
-	return decodeMessagesFromJSON(data)
+	if len(items) == 0 {
+		return []*schema.Message{}, nil
+	}
+
+	messages := make([]*schema.Message, 0, len(items))
+	for _, item := range items {
+		msg, err := decodeMessageFromJSON([]byte(item))
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, msg)
+	}
+	return messages, nil
 }
 
 func (r *RedisMemoryStore) AppendMessage(ctx context.Context, message *schema.Message) error {
@@ -67,11 +79,11 @@ func encodeMessagesToJSON(msgs *schema.Message) ([]byte, error) {
 	return json.Marshal(msgs)
 }
 
-func decodeMessagesFromJSON(data []byte) ([]*schema.Message, error) {
+func decodeMessageFromJSON(data []byte) (*schema.Message, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
-	var msgs []*schema.Message
-	err := json.Unmarshal(data, &msgs)
-	return msgs, err
+	var msg schema.Message
+	err := json.Unmarshal(data, &msg)
+	return &msg, err
 }

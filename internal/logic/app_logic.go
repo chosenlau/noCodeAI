@@ -15,6 +15,7 @@ import (
 	"github.com/chosenlau/noCodeAI/pkg/response"
 	"github.com/chosenlau/noCodeAI/pkg/snowflake"
 	"github.com/cloudwego/eino/schema"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -22,6 +23,7 @@ type AppService struct {
 	aiCodeGenFacade    *core.NoCodeAIGenFacade // AI 代码生成门面
 	userService        service.IUserService    // 用户服务接口
 	chatHistoryService service.IChatHistoryService
+	redisClient        *redis.Client
 	db                 *gorm.DB // 数据库连接
 }
 
@@ -30,13 +32,19 @@ func NewAppService(
 	userService service.IUserService,
 	chatHistoryService service.IChatHistoryService,
 	db *gorm.DB,
+	redisClient *redis.Client,
 ) *AppService {
 	return &AppService{
 		aiCodeGenFacade:    aiCodeGenFacade,
 		userService:        userService,
 		chatHistoryService: chatHistoryService,
 		db:                 db,
+		redisClient:        redisClient,
 	}
+}
+
+func appMemoryKey(appID int64) string {
+	return "memory:" + strconv.FormatInt(appID, 10)
 }
 
 func (s *AppService) AddApp(ctx context.Context, req *api.NoCodeAppAddRequest, userId int64) (int64, error) {
@@ -73,9 +81,10 @@ func (s *AppService) AddApp(ctx context.Context, req *api.NoCodeAppAddRequest, u
 	}
 
 	// 5. 保存到数据库
-	err = query.App.WithContext(ctx).
-		Select(query.App.ID, query.App.AppName, query.App.InitPrompt,
-			query.App.UserID, query.App.Priority, query.App.CodeGenType).
+	q := query.Use(s.db)
+	err = q.App.WithContext(ctx).
+		Select(q.App.ID, q.App.AppName, q.App.InitPrompt,
+			q.App.UserID, q.App.Priority, q.App.CodeGenType).
 		Create(newApp)
 	if err != nil {
 		return 0, err
@@ -91,8 +100,9 @@ func (s *AppService) UpdateApp(ctx context.Context, req *api.NoCodeAppUpdateRequ
 		return false, errorutil.ParamsError.WithMessage("应用ID不能为空")
 	}
 
+	q := query.Use(s.db)
 	// 2. 查询应用
-	app, err := query.App.WithContext(ctx).Where(query.App.ID.Eq(int64(req.Id))).First()
+	app, err := q.App.WithContext(ctx).Where(q.App.ID.Eq(int64(req.Id)), q.App.IsDelete.Eq(0)).First()
 	if err != nil {
 		return false, err
 	}
@@ -109,7 +119,7 @@ func (s *AppService) UpdateApp(ctx context.Context, req *api.NoCodeAppUpdateRequ
 	}
 
 	// 5. 执行更新
-	_, err = query.App.WithContext(ctx).Where(query.App.ID.Eq(int64(req.Id))).Updates(updateMap)
+	_, err = q.App.WithContext(ctx).Where(q.App.ID.Eq(int64(req.Id)), q.App.IsDelete.Eq(0)).Updates(updateMap)
 	if err != nil {
 		return false, err
 	}
@@ -117,25 +127,39 @@ func (s *AppService) UpdateApp(ctx context.Context, req *api.NoCodeAppUpdateRequ
 }
 
 func (s *AppService) DeleteApp(ctx context.Context, id int64, userId int64) (bool, error) {
-	// 1. 查询应用
-	app, err := query.App.WithContext(ctx).Where(query.App.ID.Eq(id)).First()
+	q := query.Use(s.db)
+	err := q.Transaction(func(tx *query.Query) error {
+		app, err := tx.App.WithContext(ctx).Where(tx.App.ID.Eq(id), tx.App.IsDelete.Eq(0)).First()
+		if err != nil {
+			return err
+		}
+		if app.UserID != userId {
+			return errorutil.ParamsError.WithMessage("无权删除该应用")
+		}
+		info, err := tx.App.WithContext(ctx).
+			Where(tx.App.ID.Eq(id), tx.App.IsDelete.Eq(0)).
+			Update(tx.App.IsDelete, 1)
+		if err != nil {
+			return errorutil.SystemError.WithMessage("failed to delete app")
+		}
+		if info.RowsAffected == 0 {
+			return errorutil.ParamsError.WithMessage("app not found or already deleted")
+		}
+		_, err = tx.ChatHistory.WithContext(ctx).
+			Where(tx.ChatHistory.AppID.Eq(id), tx.ChatHistory.IsDelete.Eq(0)).
+			Update(tx.ChatHistory.IsDelete, 1)
+		if err != nil {
+			return errorutil.SystemError.WithMessage("failed to delete chat history")
+		}
+		return nil
+	})
 	if err != nil {
 		return false, err
 	}
-
-	// 2. 权限校验
-	if app.UserID != userId {
-		return false, errorutil.ParamsError.WithMessage("无权删除该应用")
-	}
-
-	// 3. 逻辑删除应用
-	_, err = query.App.WithContext(ctx).Where(query.App.ID.Eq(id)).Update(query.App.IsDelete, 1)
-	if err != nil {
-		return false, errorutil.Success.WithMessage("failed to delete app")
-	}
-	err = s.chatHistoryService.DeleteByAppId(ctx, app.ID)
-	if err != nil {
-		return false, errorutil.Success.WithMessage("failed to delete chat history")
+	if s.redisClient != nil {
+		if err := s.redisClient.Del(ctx, appMemoryKey(id)).Err(); err != nil {
+			return false, errorutil.SystemError.WithMessage("failed to clear app memory")
+		}
 	}
 	return true, nil
 }
@@ -172,8 +196,9 @@ func (s *AppService) GetAppVo(ctx context.Context, id int64, userId int64) (api.
 }
 
 func (s *AppService) GetApp(ctx context.Context, id int64, userId int64) (*model.App, error) {
+	q := query.Use(s.db)
 	// 1. 查询应用
-	app, err := query.App.WithContext(ctx).Where(query.App.ID.Eq(id)).First()
+	app, err := q.App.WithContext(ctx).Where(q.App.ID.Eq(id), q.App.IsDelete.Eq(0)).First()
 	if err != nil {
 		return nil, err
 	}
@@ -197,11 +222,12 @@ func (s *AppService) ListMyApp(ctx context.Context, req *api.NoCodeAppMyListRequ
 		req.PageSize = 20
 	}
 
+	q := query.Use(s.db)
 	// 2. 构建查询条件
-	queryBuilder := query.App.WithContext(ctx).Where(query.App.IsDelete.Eq(0), query.App.UserID.Eq(userId))
+	queryBuilder := q.App.WithContext(ctx).Where(q.App.IsDelete.Eq(0), q.App.UserID.Eq(userId))
 
 	if req.AppName != "" {
-		queryBuilder = queryBuilder.Where(query.App.AppName.Like("%" + req.AppName + "%"))
+		queryBuilder = queryBuilder.Where(q.App.AppName.Like("%" + req.AppName + "%"))
 	}
 
 	// 3. 查询总数
@@ -216,17 +242,17 @@ func (s *AppService) ListMyApp(ctx context.Context, req *api.NoCodeAppMyListRequ
 
 	// 5. 设置排序
 	if req.SortField != "" {
-		if orderExpr, ok := query.App.GetFieldByName(req.SortField); ok {
+		if orderExpr, ok := q.App.GetFieldByName(req.SortField); ok {
 			if req.SortOrder == "desc" {
 				queryBuilder = queryBuilder.Order(orderExpr.Desc())
 			} else {
 				queryBuilder = queryBuilder.Order(orderExpr)
 			}
 		} else {
-			queryBuilder = queryBuilder.Order(query.App.CreateTime.Desc())
+			queryBuilder = queryBuilder.Order(q.App.CreateTime.Desc())
 		}
 	} else {
-		queryBuilder = queryBuilder.Order(query.App.CreateTime.Desc())
+		queryBuilder = queryBuilder.Order(q.App.CreateTime.Desc())
 	}
 
 	// 6. 执行分页查询
@@ -268,17 +294,23 @@ func (s *AppService) GetAppVoList(ctx context.Context, appList []*model.App) ([]
 	}
 
 	// 获取所有用户信息
-	userList, err := query.Use(s.db).WithContext(ctx).User.Where(query.User.ID.In(userIdList...)).Find()
+	q := query.Use(s.db)
+	userList, err := q.WithContext(ctx).User.Where(q.User.ID.In(userIdList...)).Find()
 	if err != nil {
 		return nil, err
 	}
 	userVoMap := make(map[int64]api.UserVo)
 	for _, dbUser := range userList {
-		userVo, err := s.userService.GetUserByID(ctx, dbUser.ID)
-		if err != nil {
-			return nil, err
+		userVoMap[dbUser.ID] = api.UserVo{
+			ID:          dbUser.ID,
+			UserAccount: dbUser.UserAccount,
+			UserName:    dbUser.UserName,
+			UserAvatar:  dbUser.UserAvatar,
+			UserProfile: dbUser.UserProfile,
+			UserRole:    dbUser.UserRole,
+			CreateTime:  dbUser.CreateTime,
+			UpdateTime:  dbUser.UpdateTime,
 		}
-		userVoMap[dbUser.ID] = *userVo
 	}
 
 	// 转换为AppVo列表
@@ -316,21 +348,22 @@ func (s *AppService) ListGoodApp(ctx context.Context, req *api.NoCodeAppFeatured
 		req.PageSize = 20
 	}
 
+	q := query.Use(s.db)
 	// 2. 构建查询条件（精选应用：priority > 0）
-	queryBuilder := query.App.WithContext(ctx).Where(query.App.IsDelete.Eq(0), query.App.Priority.Gt(0))
+	queryBuilder := q.App.WithContext(ctx).Where(q.App.IsDelete.Eq(0), q.App.Priority.Gt(0))
 
 	// 3. 添加查询条件
 	if req.AppName != "" {
-		queryBuilder = queryBuilder.Where(query.App.AppName.Like("%" + req.AppName + "%"))
+		queryBuilder = queryBuilder.Where(q.App.AppName.Like("%" + req.AppName + "%"))
 	}
 	if req.CodeGenType != "" {
-		queryBuilder = queryBuilder.Where(query.App.CodeGenType.Eq(req.CodeGenType))
+		queryBuilder = queryBuilder.Where(q.App.CodeGenType.Eq(req.CodeGenType))
 	}
 	if req.InitPrompt != "" {
-		queryBuilder = queryBuilder.Where(query.App.InitPrompt.Like("%" + req.InitPrompt + "%"))
+		queryBuilder = queryBuilder.Where(q.App.InitPrompt.Like("%" + req.InitPrompt + "%"))
 	}
 	if req.Priority != 0 {
-		queryBuilder = queryBuilder.Where(query.App.Priority.Eq(req.Priority))
+		queryBuilder = queryBuilder.Where(q.App.Priority.Eq(req.Priority))
 	}
 
 	// 4. 查询总数
@@ -345,17 +378,17 @@ func (s *AppService) ListGoodApp(ctx context.Context, req *api.NoCodeAppFeatured
 
 	// 6. 设置排序（默认按优先级降序、创建时间降序）
 	if req.SortField != "" {
-		if orderExpr, ok := query.App.GetFieldByName(req.SortField); ok {
+		if orderExpr, ok := q.App.GetFieldByName(req.SortField); ok {
 			if req.SortOrder == "desc" {
 				queryBuilder = queryBuilder.Order(orderExpr.Desc())
 			} else {
 				queryBuilder = queryBuilder.Order(orderExpr)
 			}
 		} else {
-			queryBuilder = queryBuilder.Order(query.App.Priority.Desc(), query.App.CreateTime.Desc())
+			queryBuilder = queryBuilder.Order(q.App.Priority.Desc(), q.App.CreateTime.Desc())
 		}
 	} else {
-		queryBuilder = queryBuilder.Order(query.App.Priority.Desc(), query.App.CreateTime.Desc())
+		queryBuilder = queryBuilder.Order(q.App.Priority.Desc(), q.App.CreateTime.Desc())
 	}
 
 	// 7. 执行分页查询
@@ -392,8 +425,9 @@ func (s *AppService) AdminUpdateApp(ctx context.Context, req *api.NoCodeAppAdmin
 		return false, err
 	}
 
+	q := query.Use(s.db)
 	// 2. 查询应用
-	_, err = query.App.WithContext(ctx).Where(query.App.ID.Eq(int64(appId))).First()
+	_, err = q.App.WithContext(ctx).Where(q.App.ID.Eq(int64(appId)), q.App.IsDelete.Eq(0)).First()
 	if err != nil {
 		return false, err
 	}
@@ -409,7 +443,7 @@ func (s *AppService) AdminUpdateApp(ctx context.Context, req *api.NoCodeAppAdmin
 	updateMap["priority"] = req.Priority
 
 	// 4. 执行更新
-	_, err = query.App.WithContext(ctx).Where(query.App.ID.Eq(int64(appId))).Updates(updateMap)
+	_, err = q.App.WithContext(ctx).Where(q.App.ID.Eq(int64(appId)), q.App.IsDelete.Eq(0)).Updates(updateMap)
 	if err != nil {
 		return false, err
 	}
@@ -417,17 +451,37 @@ func (s *AppService) AdminUpdateApp(ctx context.Context, req *api.NoCodeAppAdmin
 }
 
 func (s *AppService) AdminDeleteApp(ctx context.Context, id int64) (bool, error) {
-	// 逻辑删除应用
-	_, err := query.App.WithContext(ctx).Where(query.App.ID.Eq(id)).Update(query.App.IsDelete, 1)
+	q := query.Use(s.db)
+	err := q.Transaction(func(tx *query.Query) error {
+		info, err := tx.App.WithContext(ctx).
+			Where(tx.App.ID.Eq(id), tx.App.IsDelete.Eq(0)).
+			Update(tx.App.IsDelete, 1)
+		if err != nil {
+			return err
+		}
+		if info.RowsAffected == 0 {
+			return errorutil.ParamsError.WithMessage("app not found or already deleted")
+		}
+		_, err = tx.ChatHistory.WithContext(ctx).
+			Where(tx.ChatHistory.AppID.Eq(id), tx.ChatHistory.IsDelete.Eq(0)).
+			Update(tx.ChatHistory.IsDelete, 1)
+		return err
+	})
 	if err != nil {
 		return false, err
+	}
+	if s.redisClient != nil {
+		if err := s.redisClient.Del(ctx, appMemoryKey(id)).Err(); err != nil {
+			return false, errorutil.SystemError.WithMessage("failed to clear app memory")
+		}
 	}
 	return true, nil
 }
 
 func (s *AppService) AdminGetAppVo(ctx context.Context, id int64) (api.AppVo, error) {
+	q := query.Use(s.db)
 	// 1. 查询应用
-	app, err := query.App.WithContext(ctx).Where(query.App.ID.Eq(id)).First()
+	app, err := q.App.WithContext(ctx).Where(q.App.ID.Eq(id), q.App.IsDelete.Eq(0)).First()
 	if err != nil {
 		return api.AppVo{}, err
 	}
@@ -468,34 +522,35 @@ func (s *AppService) AdminListApp(ctx context.Context, req *api.NoCodeAppAdminLi
 		req.PageSize = 20
 	}
 
+	q := query.Use(s.db)
 	// 2. 构建查询条件
-	queryBuilder := query.App.WithContext(ctx).Where(query.App.IsDelete.Eq(0))
+	queryBuilder := q.App.WithContext(ctx).Where(q.App.IsDelete.Eq(0))
 
 	// 3. 添加查询条件
 	if req.ID != "" {
 		id, _ := strconv.ParseInt(req.ID, 10, 64)
-		queryBuilder = queryBuilder.Where(query.App.ID.Eq(id))
+		queryBuilder = queryBuilder.Where(q.App.ID.Eq(id))
 	}
 	if req.AppName != "" {
-		queryBuilder = queryBuilder.Where(query.App.AppName.Like("%" + req.AppName + "%"))
+		queryBuilder = queryBuilder.Where(q.App.AppName.Like("%" + req.AppName + "%"))
 	}
 	if req.Cover != "" {
-		queryBuilder = queryBuilder.Where(query.App.Cover.Like("%" + req.Cover + "%"))
+		queryBuilder = queryBuilder.Where(q.App.Cover.Like("%" + req.Cover + "%"))
 	}
 	if req.InitPrompt != "" {
-		queryBuilder = queryBuilder.Where(query.App.InitPrompt.Like("%" + req.InitPrompt + "%"))
+		queryBuilder = queryBuilder.Where(q.App.InitPrompt.Like("%" + req.InitPrompt + "%"))
 	}
 	if req.CodeGenType != "" {
-		queryBuilder = queryBuilder.Where(query.App.CodeGenType.Eq(req.CodeGenType))
+		queryBuilder = queryBuilder.Where(q.App.CodeGenType.Eq(req.CodeGenType))
 	}
 	if req.DeployKey != "" {
-		queryBuilder = queryBuilder.Where(query.App.DeployKey.Like("%" + req.DeployKey + "%"))
+		queryBuilder = queryBuilder.Where(q.App.DeployKey.Like("%" + req.DeployKey + "%"))
 	}
 	if req.Priority != 0 {
-		queryBuilder = queryBuilder.Where(query.App.Priority.Eq(req.Priority))
+		queryBuilder = queryBuilder.Where(q.App.Priority.Eq(req.Priority))
 	}
 	if req.UserID != 0 {
-		queryBuilder = queryBuilder.Where(query.App.UserID.Eq(req.UserID))
+		queryBuilder = queryBuilder.Where(q.App.UserID.Eq(req.UserID))
 	}
 
 	// 4. 查询总数
@@ -510,17 +565,17 @@ func (s *AppService) AdminListApp(ctx context.Context, req *api.NoCodeAppAdminLi
 
 	// 6. 设置排序
 	if req.SortField != "" {
-		if orderExpr, ok := query.App.GetFieldByName(req.SortField); ok {
+		if orderExpr, ok := q.App.GetFieldByName(req.SortField); ok {
 			if req.SortOrder == "desc" {
 				queryBuilder = queryBuilder.Order(orderExpr.Desc())
 			} else {
 				queryBuilder = queryBuilder.Order(orderExpr)
 			}
 		} else {
-			queryBuilder = queryBuilder.Order(query.App.CreateTime.Desc())
+			queryBuilder = queryBuilder.Order(q.App.CreateTime.Desc())
 		}
 	} else {
-		queryBuilder = queryBuilder.Order(query.App.CreateTime.Desc())
+		queryBuilder = queryBuilder.Order(q.App.CreateTime.Desc())
 	}
 
 	// 7. 执行分页查询
@@ -550,8 +605,9 @@ func (s *AppService) ChatToGenCode(ctx context.Context, appId int64, message str
 		return nil, errorutil.ParamsError.WithMessage("应用ID不能为空")
 	}
 
+	q := query.Use(s.db)
 	// 2. 校验应用是否存在
-	app, err := query.App.WithContext(ctx).Where(query.App.ID.Eq(appId), query.App.IsDelete.Eq(0)).First()
+	app, err := q.App.WithContext(ctx).Where(q.App.ID.Eq(appId), q.App.IsDelete.Eq(0)).First()
 	if err != nil {
 		return nil, err
 	}
@@ -568,7 +624,7 @@ func (s *AppService) ChatToGenCode(ctx context.Context, appId int64, message str
 
 	err = s.chatHistoryService.AddChatMessage(ctx, appId, message, enum.UserMessageType, loginUser.ID)
 	if err != nil {
-		return nil, errorutil.Success.WithMessage("failed to save chat history")
+		return nil, errorutil.SystemError.WithMessage("failed to save chat history")
 	}
 	// 5. 调用代码生成服务
 	return s.aiCodeGenFacade.GenCodeStreamAndSave(ctx, appId, message, enum.CodeGenTypeEnum(app.CodeGenType))

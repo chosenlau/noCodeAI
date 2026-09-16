@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/chosenlau/noCodeAI/internal/handler"
@@ -20,8 +19,8 @@ import (
 
 func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandler *handler.AppHandler, chatHistoryHandler *handler.ChatHistoryHandler, userService service.IUserService) {
 	h.Use(cors.New(cors.Config{
-		AllowAllOrigins:  true,
-		AllowMethods:     []string{"*"},
+		AllowOrigins:     []string{"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"*"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
@@ -36,7 +35,7 @@ func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandle
 		userRoute.GET("/get/vo", userHandler.GetUserByID)
 
 		userRoute.GET("/get/login", middleware.AuthMiddleware(userService), userHandler.GetLoginUserVo)
-		userRoute.GET("/logout", middleware.AuthMiddleware(userService), userHandler.UserLogout)
+		userRoute.GET("/logout", userHandler.UserLogout)
 
 		userRoute.POST("/add", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), userHandler.AddUser)
 		userRoute.POST("/update", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), userHandler.UpdateUser)
@@ -75,6 +74,6 @@ func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandle
 
 func CustomRecoveryHandler(ctx context.Context, c *app.RequestContext, err interface{}, stack []byte) {
 	hlog.Errorf("panic recovered:%v\n%s", err, stack)
-	c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.SystemError.WithMessage(fmt.Sprintf("%v", err))))
+	c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.SystemError))
 	c.Abort()
 }

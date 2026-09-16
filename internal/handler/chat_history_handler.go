@@ -56,11 +56,12 @@ func (h *ChatHistoryHandler) ListAppChatHistory(ctx context.Context, c *app.Requ
 			lastCreateTime = t
 		}
 	}
-
-	cookieVal := c.Cookie("user_id")
-	if len(cookieVal) == 0 {
-		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError.WithMessage("Login status not detected.")))
-		return
+	lastIDStr := c.Query("lastId")
+	var lastID int64
+	if lastIDStr != "" {
+		if id, err := strconv.ParseInt(lastIDStr, 10, 64); err == nil {
+			lastID = id
+		}
 	}
 
 	v, exists := c.Get(constants.UserVoKey)
@@ -73,7 +74,7 @@ func (h *ChatHistoryHandler) ListAppChatHistory(ctx context.Context, c *app.Requ
 	userVo := v.(*api.UserVo)
 
 	// 5. 调用服务层方法
-	result, err := h.chatHistoryService.ListAppChatHistoryByPage(ctx, appId, pageSize, lastCreateTime, userVo)
+	result, err := h.chatHistoryService.ListAppChatHistoryByPage(ctx, appId, pageSize, lastCreateTime, lastID, userVo)
 	if err != nil {
 		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
 		return

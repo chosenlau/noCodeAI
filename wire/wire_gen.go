@@ -41,7 +41,7 @@ func InitializeApp() (*server.Hertz, error) {
 		return nil, err
 	}
 	noCodeAIGenFacade := core.NewNoCodeAIGenFacade(codeGenAgentFactory, codeSaver)
-	appService := logic.NewAppService(noCodeAIGenFacade, userService, chatHistoryService, db)
+	appService := logic.NewAppService(noCodeAIGenFacade, userService, chatHistoryService, db, client)
 	appHandler := handler.NewAppHandler(appService, userService, chatHistoryService)
 	chatHistoryHandler := handler.NewChatHistoryHandler(chatHistoryService, userService)
 	hertz := initServer(configConfig, userHandler, appHandler, chatHistoryHandler, userService)

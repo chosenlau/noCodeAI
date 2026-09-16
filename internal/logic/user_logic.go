@@ -2,6 +2,8 @@ package logic
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,11 +30,29 @@ type UserService struct {
 	redisClient *redis.Client
 }
 
+const (
+	sessionKeyPrefix      = "session:"
+	userSessionsKeyPrefix = "user:sessions:"
+	sessionTTL            = 24 * time.Hour
+)
+
 func NewUserService(db *gorm.DB, redisClient *redis.Client) *UserService {
 	return &UserService{
 		db:          db,
 		redisClient: redisClient,
 	}
+}
+
+func (s *UserService) userSessionsKey(userID int64) string {
+	return fmt.Sprintf("%s%d", userSessionsKeyPrefix, userID)
+}
+
+func (s *UserService) generateSessionID() (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	return sessionKeyPrefix + base64.RawURLEncoding.EncodeToString(b[:]), nil
 }
 func (s *UserService) HashPassword(ctx context.Context, password string) (string, error) {
 	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
@@ -95,7 +115,10 @@ func (s *UserService) UserLogin(ctx context.Context, req *api.NoCodeLoginRequest
 	}
 
 	q := query.Use(s.db)
-	user, err := q.User.WithContext(ctx).Where(q.User.UserAccount.Eq(req.UserAccount)).First()
+	user, err := q.User.WithContext(ctx).Where(
+		q.User.UserAccount.Eq(req.UserAccount),
+		q.User.IsDelete.Eq(0),
+	).First()
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, "", errorutil.ParamsError
@@ -106,7 +129,10 @@ func (s *UserService) UserLogin(ctx context.Context, req *api.NoCodeLoginRequest
 		return nil, "", errorutil.ParamsError.WithMessage("Incorrect password.")
 	}
 	// 4. 生成 sessionId
-	sessionId := fmt.Sprintf("session:%d", time.Now().UnixNano())
+	sessionId, err := s.generateSessionID()
+	if err != nil {
+		return nil, "", errorutil.SystemError.WithMessage("Failed to generate session ID.")
+	}
 
 	userVo := api.UserVo{
 		ID:          user.ID,
@@ -123,8 +149,11 @@ func (s *UserService) UserLogin(ctx context.Context, req *api.NoCodeLoginRequest
 	if err != nil {
 		return nil, "", err
 	}
-	err = s.redisClient.Set(ctx, sessionId, userVoJson, 24*time.Hour).Err()
-	if err != nil {
+	pipe := s.redisClient.Pipeline()
+	pipe.Set(ctx, sessionId, userVoJson, sessionTTL)
+	pipe.SAdd(ctx, s.userSessionsKey(user.ID), sessionId)
+	pipe.Expire(ctx, s.userSessionsKey(user.ID), sessionTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
 		return nil, "", err
 	}
 
@@ -132,11 +161,14 @@ func (s *UserService) UserLogin(ctx context.Context, req *api.NoCodeLoginRequest
 }
 
 func (s *UserService) GetLoginUserVo(ctx context.Context, sessionId string) (*api.UserVo, error) {
-	decodedSessionId, err := url.QueryUnescape(string(sessionId))
+	decodedSessionId, err := url.QueryUnescape(sessionId)
 	if err != nil {
 		return nil, err
 	}
 	// 关键步骤：从Redis获取用户信息
+	if !strings.HasPrefix(decodedSessionId, sessionKeyPrefix) {
+		return nil, errorutil.ParamsError.WithMessage("invalid session")
+	}
 	userJson, err := s.redisClient.Get(ctx, decodedSessionId).Result()
 	if err != nil {
 		return nil, errorutil.ParamsError.WithMessage("登录已过期，请重新登录")
@@ -146,25 +178,58 @@ func (s *UserService) GetLoginUserVo(ctx context.Context, sessionId string) (*ap
 	if err != nil {
 		return nil, err
 	}
-	q := query.Use(s.db)
-	_, err = q.User.WithContext(ctx).Where(query.User.ID.Eq(userVo.ID), query.User.IsDelete.Eq(0)).First()
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errorutil.ParamsError.WithMessage("failed to verify user")
-		}
-		return nil, errorutil.SystemError.WithMessage("Failed to query user.")
-	}
-	userVo = api.UserVo{
-		ID:          userVo.ID,
-		UserAccount: userVo.UserAccount,
-		UserName:    userVo.UserName,
-		UserAvatar:  userVo.UserAvatar,
-		UserProfile: userVo.UserProfile,
-		UserRole:    userVo.UserRole,
-		CreateTime:  userVo.CreateTime,
-		UpdateTime:  userVo.UpdateTime,
-	}
 	return &userVo, nil
+}
+
+func (s *UserService) UserLogout(ctx context.Context, sessionId string, userId int64) error {
+	decodedSessionId, err := url.QueryUnescape(sessionId)
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(decodedSessionId, sessionKeyPrefix) {
+		return nil
+	}
+
+	if userId <= 0 {
+		userJson, err := s.redisClient.Get(ctx, decodedSessionId).Result()
+		if err != nil && !errors.Is(err, redis.Nil) {
+			return err
+		}
+		if err == nil {
+			var userVo api.UserVo
+			if err := json.Unmarshal([]byte(userJson), &userVo); err != nil {
+				return err
+			}
+			userId = userVo.ID
+		}
+	}
+
+	pipe := s.redisClient.Pipeline()
+	pipe.Del(ctx, decodedSessionId)
+	if userId > 0 {
+		pipe.SRem(ctx, s.userSessionsKey(userId), decodedSessionId)
+	}
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func (s *UserService) invalidateUserSessions(ctx context.Context, userId int64) error {
+	if userId <= 0 {
+		return nil
+	}
+	key := s.userSessionsKey(userId)
+	sessions, err := s.redisClient.SMembers(ctx, key).Result()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		return err
+	}
+
+	pipe := s.redisClient.Pipeline()
+	if len(sessions) > 0 {
+		pipe.Del(ctx, sessions...)
+	}
+	pipe.Del(ctx, key)
+	_, err = pipe.Exec(ctx)
+	return err
 }
 
 func (s *UserService) GetUserByID(ctx context.Context, id int64) (*api.UserVo, error) {
@@ -203,6 +268,9 @@ func (s *UserService) DeleteUser(ctx context.Context, req *api.NoCodeUserUpdateR
 	}
 	if info.RowsAffected == 0 {
 		return errorutil.ParamsError.WithMessage("User not found or already deleted.")
+	}
+	if err := s.invalidateUserSessions(ctx, req.Id); err != nil {
+		return errorutil.SystemError.WithMessage("Failed to invalidate user sessions.")
 	}
 	return nil
 }
@@ -244,6 +312,9 @@ func (s *UserService) UpdateUser(ctx context.Context, req *api.NoCodeUserUpdateR
 		return errorutil.ParamsError
 	}
 
+	if err := s.invalidateUserSessions(ctx, req.Id); err != nil {
+		return errorutil.SystemError.WithMessage("Failed to invalidate user sessions.")
+	}
 	return nil
 }
 

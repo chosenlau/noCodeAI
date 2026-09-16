@@ -56,22 +56,30 @@ func (y *NoCodeAIGenFacade) processCodeStream(respStream *schema.StreamReader[*s
 		case enum.HtmlCodeGen:
 			var result aimodel.HtmlCodeResponse
 			response := agent.ParseCodeResponse([]byte(builder.String()))
-			json.Unmarshal(response, &result)
+			if err := json.Unmarshal(response, &result); err != nil {
+				logger.Errorf("解析 HTML 代码响应失败: %v", err)
+				return
+			}
 
 			dirPath, err := y.codeSaver.SaveHtml(appID, &result)
 			if err != nil {
-				logger.Error("代码保存失败: %v", err)
+				logger.Errorf("代码保存失败: %v", err)
+				return
 			}
-			logger.Info("代码已保存到目录: %s", dirPath)
+			logger.Infof("代码已保存到目录: %s", dirPath)
 		case enum.MultiFileGen:
 			var result aimodel.MultiFileCodeResponse
 			response := agent.ParseCodeResponse([]byte(builder.String()))
-			json.Unmarshal(response, &result)
+			if err := json.Unmarshal(response, &result); err != nil {
+				logger.Errorf("解析多文件代码响应失败: %v", err)
+				return
+			}
 			dirPath, err := y.codeSaver.SaveMultiFile(appID, &result)
 			if err != nil {
-				logger.Error("代码保存失败: %v", err)
+				logger.Errorf("代码保存失败: %v", err)
+				return
 			}
-			logger.Info("代码已保存到目录: %s", dirPath)
+			logger.Infof("代码已保存到目录: %s", dirPath)
 		default:
 			logger.Errorf("不支持的代码生成类型: %s", typeStr)
 		}
@@ -82,7 +90,7 @@ func (y *NoCodeAIGenFacade) processCodeStream(respStream *schema.StreamReader[*s
 }
 
 func (y *NoCodeAIGenFacade) GenCodeStreamAndSave(ctx context.Context, appID int64, userMessage string, typeStr enum.CodeGenTypeEnum) (*schema.StreamReader[*schema.Message], error) {
-	genAgent, err := y.codeGenFactory.GetCodeGenAgent(ctx,appID, typeStr)
+	genAgent, err := y.codeGenFactory.GetCodeGenAgent(ctx, appID, typeStr)
 	if err != nil {
 		return nil, err
 	}

@@ -17,7 +17,9 @@ import (
 	"github.com/chosenlau/noCodeAI/pkg/response"
 	"github.com/chosenlau/noCodeAI/pkg/snowflake"
 	"github.com/cloudwego/eino/schema"
+	"gorm.io/gen/field"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type ChatHistoryService struct {
@@ -31,7 +33,7 @@ func NewChatHistoryService(db *gorm.DB) *ChatHistoryService {
 }
 
 func (s *ChatHistoryService) ListAppChatHistoryByPage(ctx context.Context,
-	appId int64, pageSize int32, lastCreateTime time.Time, loginUser *api.UserVo) (*response.PageResponse[*model.ChatHistory], error) {
+	appId int64, pageSize int32, lastCreateTime time.Time, lastID int64, loginUser *api.UserVo) (*response.PageResponse[*model.ChatHistory], error) {
 
 	// 1. 校验基本参数
 	if appId == 0 || appId < 0 || pageSize <= 0 || pageSize > 50 {
@@ -42,7 +44,8 @@ func (s *ChatHistoryService) ListAppChatHistoryByPage(ctx context.Context,
 	}
 
 	// 2. 校验用户角色是否为管理员或者应用创建者
-	app, err := query.Use(s.db).App.WithContext(ctx).Where(query.App.ID.Eq(appId)).First()
+	q := query.Use(s.db)
+	app, err := q.App.WithContext(ctx).Where(q.App.ID.Eq(appId), q.App.IsDelete.Eq(0)).First()
 	if err != nil {
 		return nil, err
 	}
@@ -51,13 +54,20 @@ func (s *ChatHistoryService) ListAppChatHistoryByPage(ctx context.Context,
 	}
 
 	// 3. 构建查询条件
-	chatHistoryQuery := query.Use(s.db).ChatHistory.WithContext(ctx).
-		Where(query.ChatHistory.AppID.Eq(appId)).
-		Where(query.ChatHistory.MessageType.Neq(string(enum.SummaryMessageType)))
+	chatHistoryQuery := q.ChatHistory.WithContext(ctx).
+		Where(q.ChatHistory.AppID.Eq(appId), q.ChatHistory.IsDelete.Eq(0)).
+		Where(q.ChatHistory.MessageType.Neq(string(enum.SummaryMessageType)))
 
 	// 4. 处理时间过滤（游标分页）
 	if !lastCreateTime.IsZero() {
-		chatHistoryQuery = chatHistoryQuery.Where(query.ChatHistory.CreateTime.Lt(lastCreateTime))
+		cursorCond := q.ChatHistory.CreateTime.Lt(lastCreateTime)
+		if lastID > 0 {
+			cursorCond = field.Or(
+				q.ChatHistory.CreateTime.Lt(lastCreateTime),
+				field.And(q.ChatHistory.CreateTime.Eq(lastCreateTime), q.ChatHistory.ID.Lt(lastID)),
+			)
+		}
+		chatHistoryQuery = chatHistoryQuery.Where(cursorCond)
 	}
 
 	// 5. 查询总记录数
@@ -74,7 +84,7 @@ func (s *ChatHistoryService) ListAppChatHistoryByPage(ctx context.Context,
 	//TODO:cursor分页
 	// 7. 分页查询应用的聊天记录
 	chatHistoryList, err := chatHistoryQuery.
-		Order(query.ChatHistory.CreateTime.Desc()).
+		Order(q.ChatHistory.CreateTime.Desc(), q.ChatHistory.ID.Desc()).
 		Limit(int(pageSize)).
 		Find()
 	if err != nil {
@@ -99,9 +109,10 @@ func (s *ChatHistoryService) DeleteByAppId(ctx context.Context, appId int64) err
 	}
 
 	// 2. 删除该应用的所有对话记录
-	_, err := query.Use(s.db).ChatHistory.WithContext(ctx).
-		Where(query.ChatHistory.AppID.Eq(appId)).
-		Delete()
+	q := query.Use(s.db)
+	_, err := q.ChatHistory.WithContext(ctx).
+		Where(q.ChatHistory.AppID.Eq(appId), q.ChatHistory.IsDelete.Eq(0)).
+		Update(q.ChatHistory.IsDelete, 1)
 	if err != nil {
 		return err
 	}
@@ -117,48 +128,56 @@ func (s *ChatHistoryService) AddChatMessage(ctx context.Context, appId int64,
 		return errorutil.ParamsError
 	}
 
-	// 2. 获取上一条消息的轮次
-	lastMessage, err := query.Use(s.db).ChatHistory.WithContext(ctx).
-		Where(query.ChatHistory.AppID.Eq(appId)).
-		Order(query.ChatHistory.CreateTime.Desc()).
-		First()
-
 	var turnNumber int32
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			turnNumber = 0
-		} else {
+	err := query.Use(s.db).Transaction(func(tx *query.Query) error {
+		_, err := tx.App.WithContext(ctx).
+			Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where(tx.App.ID.Eq(appId), tx.App.IsDelete.Eq(0)).
+			First()
+		if err != nil {
 			return err
 		}
-	} else {
-		turnNumber = lastMessage.TurnNumber
-	}
 
-	// 3. 如果当前是用户消息，开启新的一轮
-	if messageType == enum.UserMessageType {
-		turnNumber += 1
-	}
+		lastMessage, err := tx.ChatHistory.WithContext(ctx).
+			Where(tx.ChatHistory.AppID.Eq(appId), tx.ChatHistory.IsDelete.Eq(0)).
+			Order(tx.ChatHistory.CreateTime.Desc(), tx.ChatHistory.ID.Desc()).
+			First()
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				turnNumber = 0
+			} else {
+				return err
+			}
+		} else {
+			turnNumber = lastMessage.TurnNumber
+		}
 
-	// 4. 生成雪花算法ID
-	chatMessageId, err := snowflake.GenerateSnowFlakeId()
-	if err != nil {
-		return err
-	}
+		// 2. 如果当前是用户消息，开启新的一轮
+		if messageType == enum.UserMessageType {
+			turnNumber += 1
+		}
 
-	// 5. 创建对话记录
-	err = query.Use(s.db).WithContext(ctx).ChatHistory.Create(&model.ChatHistory{
-		ID:          chatMessageId,
-		AppID:       appId,
-		Message:     message,
-		MessageType: string(messageType),
-		UserID:      userId,
-		TurnNumber:  turnNumber,
+		// 3. 生成雪花算法ID
+		chatMessageId, err := snowflake.GenerateSnowFlakeId()
+		if err != nil {
+			return err
+		}
+
+		// 4. 创建对话记录
+		return tx.WithContext(ctx).ChatHistory.Create(&model.ChatHistory{
+			ID:          chatMessageId,
+			AppID:       appId,
+			Message:     message,
+			MessageType: string(messageType),
+			UserID:      userId,
+			TurnNumber:  turnNumber,
+		})
 	})
 	if err != nil {
 		return err
 	}
 
-	// 6. 当对话轮次达到20轮且为AI消息时，异步生成总结
+	// 5. 当对话轮次达到20轮且为AI消息时，异步生成总结
 	if turnNumber >= 20 && messageType == enum.AIMessageType {
 		go s.generateSummary(context.Background(), appId, userId)
 	}
@@ -170,8 +189,8 @@ func (s *ChatHistoryService) AddChatMessage(ctx context.Context, appId int64,
 func (s *ChatHistoryService) generateSummary(ctx context.Context, appId int64, userId int64) {
 	// 1. 获取历史对话记录（按时间正序）
 	historyList, err := query.Use(s.db).WithContext(ctx).ChatHistory.
-		Where(query.ChatHistory.AppID.Eq(appId)).
-		Order(query.ChatHistory.CreateTime.Asc()).
+		Where(query.ChatHistory.AppID.Eq(appId), query.ChatHistory.IsDelete.Eq(0)).
+		Order(query.ChatHistory.CreateTime.Asc(), query.ChatHistory.ID.Asc()).
 		Find()
 	if err != nil {
 		logger.Errorf("获取历史对话失败: %v\n", err)
@@ -207,7 +226,7 @@ func (s *ChatHistoryService) ListAllChatHistoryByPageForAdmin(ctx context.Contex
 
 	// 2. 构建基础查询
 	chatHistoryQuery := query.Use(s.db).ChatHistory.WithContext(ctx).
-		Where(query.ChatHistory.ID.IsNotNull())
+		Where(query.ChatHistory.ID.IsNotNull(), query.ChatHistory.IsDelete.Eq(0))
 
 	// 3. 动态添加查询条件
 	if queryRequest.Id > 0 {
@@ -228,9 +247,14 @@ func (s *ChatHistoryService) ListAllChatHistoryByPageForAdmin(ctx context.Contex
 		)
 	}
 	if !queryRequest.LastCreateTime.IsZero() {
-		chatHistoryQuery = chatHistoryQuery.Where(
-			query.ChatHistory.CreateTime.Lt(queryRequest.LastCreateTime),
-		)
+		cursorCond := query.ChatHistory.CreateTime.Lt(queryRequest.LastCreateTime)
+		if queryRequest.LastId > 0 {
+			cursorCond = field.Or(
+				query.ChatHistory.CreateTime.Lt(queryRequest.LastCreateTime),
+				field.And(query.ChatHistory.CreateTime.Eq(queryRequest.LastCreateTime), query.ChatHistory.ID.Lt(queryRequest.LastId)),
+			)
+		}
+		chatHistoryQuery = chatHistoryQuery.Where(cursorCond)
 	}
 
 	// 4. 查询总记录数
@@ -250,7 +274,7 @@ func (s *ChatHistoryService) ListAllChatHistoryByPageForAdmin(ctx context.Contex
 
 	// 7. 执行分页查询
 	chatHistoryList, err := chatHistoryQuery.
-		Order(query.ChatHistory.CreateTime.Desc()).
+		Order(query.ChatHistory.CreateTime.Desc(), query.ChatHistory.ID.Desc()).
 		Limit(int(pageSize)).
 		Offset(offset).
 		Find()
@@ -281,12 +305,14 @@ func (s *ChatHistoryService) LoadChatHistoryToMemory(
 	var summaryMsg *model.ChatHistory
 	summaryMsg, _ = q.WithContext(ctx).Where(
 		q.AppID.Eq(appId),
+		q.IsDelete.Eq(0),
 		q.MessageType.Eq(string(enum.SummaryMessageType)),
-	).Order(q.CreateTime.Desc()).First() // 直接拿最新的一条
+	).Order(q.CreateTime.Desc(), q.ID.Desc()).First() // 直接拿最新的一条
 
 	// 2. 动态构建“近期对话”查询条件
 	recentQuery := q.WithContext(ctx).Where(
 		q.AppID.Eq(appId),
+		q.IsDelete.Eq(0),
 		q.MessageType.Neq(string(enum.SummaryMessageType)), // 排除摘要本身，只查纯对话
 	)
 
@@ -297,7 +323,7 @@ func (s *ChatHistoryService) LoadChatHistoryToMemory(
 
 	// 3. 执行查询，使用 Offset(1) 剔除当次请求引发的未完成脏数据
 	recentHistory, err := recentQuery.
-		Order(q.CreateTime.Desc()).
+		Order(q.CreateTime.Desc(), q.ID.Desc()).
 		Offset(1).
 		Limit(maxCount).
 		Find()

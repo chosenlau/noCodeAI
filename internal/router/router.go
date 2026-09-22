@@ -50,7 +50,8 @@ func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandle
 		appRoute.GET("/get/vo", middleware.AuthMiddleware(userService), appHandler.GetAppVo)
 
 		// 用户接口（需要登录）
-		appRoute.POST("/my/list/page/vo", middleware.AuthMiddleware(userService), appHandler.ListMyApp)
+		appRoute.GET("/my/list/page/vo", middleware.AuthMiddleware(userService), appHandler.ListMyApp)
+		appRoute.GET("/chat", middleware.AuthMiddleware(userService), appHandler.ChatToGenCode)
 		appRoute.POST("/add", middleware.AuthMiddleware(userService), appHandler.AddApp)
 		appRoute.POST("/update", middleware.AuthMiddleware(userService), appHandler.UpdateApp)
 		appRoute.POST("/delete", middleware.AuthMiddleware(userService), appHandler.DeleteApp)

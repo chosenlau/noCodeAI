@@ -1,0 +1,10 @@
+./funcdata.go
+./funcdata_go126.go
+./loader.go
+./loader_latest.go
+./mmap_windows.go
+./moduledata.go
+./pcdata.go
+./register.go
+./stubs.go
+./wrapper.go

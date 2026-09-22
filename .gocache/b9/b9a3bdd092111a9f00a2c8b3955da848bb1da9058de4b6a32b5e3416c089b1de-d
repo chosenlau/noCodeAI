@@ -1,0 +1,12 @@
+./exit_tool.go
+./file_delete_tool.go
+./file_dir_read_tool.go
+./file_modify_tool.go
+./file_read_tool.go
+./file_write_tool.go
+./image_search_tool.go
+./logo_generator_tool.go
+./mermaid_diagram_tool.go
+./my_base_tool.go
+./tool_manager.go
+./undraw_illustration_tool.go

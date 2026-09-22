@@ -1,0 +1,2 @@
+./memory_store.go
+./redis_store.go

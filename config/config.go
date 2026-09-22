@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sync"
@@ -14,10 +15,13 @@ import (
 
 // mapstructure->viper配置
 type Config struct {
-	Server   ServerConfig   `mapstructure:"server"`
-	Database DatabaseConfig `mapstructure:"database"`
-	Redis    RedisConfig `mapstructure:"redis"`
-	AI       AIConfig       `mapstructure:"ai"`
+	Server    ServerConfig    `mapstructure:"server"`
+	Database  DatabaseConfig  `mapstructure:"database"`
+	Redis     RedisConfig     `mapstructure:"redis"`
+	AI        AIConfig        `mapstructure:"ai"`
+	COS       COSConfig       `yaml:"cos" mapstructure:"cos"`
+	Pexels    PexelsConfig    `yaml:"pexels" mapstructure:"pexels"`
+	DashScope DashScopeConfig `yaml:"dashscope" mapstructure:"dashscope"`
 }
 
 type ServerConfig struct {
@@ -40,10 +44,27 @@ type RedisConfig struct {
 }
 
 type AIConfig struct {
-	APIKey  string `mapstructure:"api_key"`
-	Model   string `mapstructure:"model"`
-	BaseURL string `mapstructure:"base_url"`
+	APIKey   string `mapstructure:"api_key"`
+	Model    string `mapstructure:"model"`
+	BaseURL  string `mapstructure:"base_url"`
 	Provider string `mapstructure:"provider"`
+}
+
+type COSConfig struct {
+	Host      string `yaml:"host" mapstructure:"host"`
+	SecretID  string `yaml:"secret-id" mapstructure:"secret-id"`
+	SecretKey string `yaml:"secret-key" mapstructure:"secret-key"`
+	Region    string `yaml:"region" mapstructure:"region"`
+	Bucket    string `yaml:"bucket" mapstructure:"bucket"`
+}
+
+type PexelsConfig struct {
+	APIKey string `yaml:"api-key" mapstructure:"api-key"`
+}
+
+type DashScopeConfig struct {
+	APIKey     string `yaml:"api-key" mapstructure:"api-key"`
+	ImageModel string `yaml:"image-model" mapstructure:"image-model"`
 }
 
 var (
@@ -68,6 +89,14 @@ func GetProjectRootPath() (string, error) {
 		}
 		dir = parentdir
 	}
+}
+func GetProjectSavePath() (string, error) {
+	root, err := GetProjectRootPath()
+	if err != nil {
+		return "", fmt.Errorf("获取存储根目录失败: %w", err)
+	}
+	genPath := path.Join(root, "saves")
+	return genPath, nil
 }
 
 func InitConfig() *Config {

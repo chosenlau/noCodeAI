@@ -2,7 +2,6 @@ import api from './config';
 import type {
   AppVo,
   UpdateAppRequest,
-  MyAppQueryRequest,
   AppQueryRequest,
   PageResult
 } from '@/types/api';
@@ -11,8 +10,8 @@ export const appApi = {
   listFeatured: (query: AppQueryRequest) =>
     api.post('/app/good/list/page/vo', query) as Promise<PageResult<AppVo>>,
 
-  listMyApps: (query: MyAppQueryRequest) =>
-    api.post('/app/my/list/page/vo', query) as Promise<PageResult<AppVo>>,
+  listMyApps: () =>
+    api.get('/app/my/list/page/vo') as Promise<PageResult<AppVo>>,
 
   getDetail: (id: string) =>
     api.get('/app/get/vo', { params: { id } }) as Promise<AppVo>,

@@ -88,4 +88,3 @@ func TestUserService_generateSessionID_IsRandomAndPrefixed(t *testing.T) {
 		t.Fatalf("expected session ID prefixed with %q, got %q", sessionKeyPrefix, a)
 	}
 }
-

@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	aimodel "github.com/chosenlau/noCodeAI/internal/ai/ai_model"
+	aimodel "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
 )
 
 var (

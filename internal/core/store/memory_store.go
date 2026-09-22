@@ -12,30 +12,40 @@ import (
 
 // MemoryStore 对话记忆存储接口
 type MemoryStore interface {
-	GetMessages(ctx context.Context) ([]*schema.Message, error)
-	AppendMessage(ctx context.Context, message *schema.Message) error
-	ClearMessages(ctx context.Context) error
+	GetMessages(ctx context.Context,memoryId string) ([]*schema.Message, error)
+	AppendMessage(ctx context.Context, message *schema.Message,memoryId string) error
+	ClearMessages(ctx context.Context,memoryId string) error
+	AddAssistantMessage(ctx context.Context, assistantMsg string, memoryId string) error
+	AddUserMessage(ctx context.Context, userMsg string, memoryId string) error
 }
 
 // RedisMemoryStore Redis实现的内存存储
 type RedisMemoryStore struct {
 	redisClient       *redis.Client
-	memoryId          string
 	maxMemoryMessages int
 	ttl               time.Duration
 }
 
-func NewRedisMemoryStore(redisClient *redis.Client, memoryId string, maxMemoryMessages int, ttl time.Duration) *RedisMemoryStore {
+func NewRedisMemoryStore(redisClient *redis.Client, maxMemoryMessages int, ttl time.Duration) *RedisMemoryStore {
 	return &RedisMemoryStore{
 		redisClient:       redisClient,
-		memoryId:          memoryId,
 		maxMemoryMessages: maxMemoryMessages,
 		ttl:               ttl,
 	}
 }
 
-func (r *RedisMemoryStore) GetMessages(ctx context.Context) ([]*schema.Message, error) {
-	key := fmt.Sprintf("memory:%s", r.memoryId)
+func(r *RedisMemoryStore)AddAssistantMessage(ctx context.Context, assistantMsg string, memoryId string) error {
+	message := schema.AssistantMessage(assistantMsg,nil)
+	return r.AppendMessage(ctx, message, memoryId)
+}
+
+func(r *RedisMemoryStore)AddUserMessage(ctx context.Context, userMsg string, memoryId string) error {
+	message := schema.UserMessage(userMsg)
+	return r.AppendMessage(ctx, message, memoryId)
+}
+
+func (r *RedisMemoryStore) GetMessages(ctx context.Context, memoryId string) ([]*schema.Message, error) {
+	key := fmt.Sprintf("memory:%s", memoryId)
 	items, err := r.redisClient.LRange(ctx, key, 0, -1).Result()
 	if err != nil {
 		return nil, err
@@ -55,8 +65,8 @@ func (r *RedisMemoryStore) GetMessages(ctx context.Context) ([]*schema.Message, 
 	return messages, nil
 }
 
-func (r *RedisMemoryStore) AppendMessage(ctx context.Context, message *schema.Message) error {
-	key := fmt.Sprintf("memory:%s", r.memoryId)
+func (r *RedisMemoryStore) AppendMessage(ctx context.Context, message *schema.Message, memoryId string) error {
+	key := fmt.Sprintf("memory:%s", memoryId)
 	data, err := encodeMessagesToJSON(message)
 	if err != nil {
 		return err
@@ -70,8 +80,8 @@ func (r *RedisMemoryStore) AppendMessage(ctx context.Context, message *schema.Me
 	_, err = pipe.Exec(ctx)
 	return err
 }
-func (r *RedisMemoryStore) ClearMessages(ctx context.Context) error {
-	key := fmt.Sprintf("memory:%s", r.memoryId)
+func (r *RedisMemoryStore) ClearMessages(ctx context.Context, memoryId string) error {
+	key := fmt.Sprintf("memory:%s", memoryId)
 	return r.redisClient.Del(ctx, key).Err()
 }
 

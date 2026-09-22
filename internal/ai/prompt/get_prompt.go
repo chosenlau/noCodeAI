@@ -6,15 +6,20 @@ import (
 	"sync"
 
 	"github.com/chosenlau/noCodeAI/config"
-
 	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/schema"
 )
 
 var (
-	htmlPrompt      string
-	multiFilePrompt string
-	promptOnce      sync.Once
+	htmlPrompt                string
+	multiFilePrompt           string
+	vuePrompt                 string
+	routingPrompt             string
+	imageCollectionPrompt     string
+	imageCollectionPlanPrompt string
+	codeQualityCheckPrompt    string
+	chatSummaryPrompt         string
+	promptOnce                sync.Once
 )
 
 func loadPromptFile(fileName string) (string, error) {
@@ -43,6 +48,32 @@ func LoadPrompts() error {
 			panic(err)
 		}
 
+		vuePrompt, err = loadPromptFile("codegen-vue-project-system-prompt.txt")
+		if err != nil {
+			panic(err)
+		}
+
+		routingPrompt, err = loadPromptFile("codegen-routing-system-prompt.txt")
+		if err != nil {
+			panic(err)
+		}
+
+		imageCollectionPrompt, err = loadPromptFile("image-collection-system-prompt.txt")
+		if err != nil {
+			panic(err)
+		}
+
+		imageCollectionPlanPrompt, err = loadPromptFile("image-collection-plan-system-prompt.txt")
+		if err != nil {
+			panic(err)
+		}
+
+		codeQualityCheckPrompt, err = loadPromptFile("code-quality-check-system-prompt.txt")
+		if err != nil {
+			panic(err)
+		}
+
+		chatSummaryPrompt, err = loadPromptFile("chat-summary-system-prompt.txt")
 		if err != nil {
 			panic(err)
 		}
@@ -58,20 +89,66 @@ func GetMultiFilePrompt() string {
 	return multiFilePrompt
 }
 
+func GetVuePrompt() string {
+	return vuePrompt
+}
+
+func GetRoutingPrompt() string {
+	return routingPrompt
+}
+
+func GetImageCollectionPrompt() string {
+	return imageCollectionPrompt
+}
+
+func GetImageCollectionPlanPrompt() string {
+	return imageCollectionPlanPrompt
+}
+
+func GetCodeQualityCheckPrompt() string {
+	return codeQualityCheckPrompt
+}
+
+func GetChatSummaryPrompt() string {
+	return chatSummaryPrompt
+}
+
 func NewMultiFileChatTemplate() (prompt.ChatTemplate, error) {
-	LoadPrompts()
 	return newChatTemplate(GetMultiFilePrompt()), nil
 }
 
 func NewHtmlChatTemplate() (prompt.ChatTemplate, error) {
-	LoadPrompts()
 	return newChatTemplate(GetHtmlPrompt()), nil
+}
+
+func NewVueProjectPrompt() (prompt.ChatTemplate, error) {
+	return newChatTemplate(GetVuePrompt()), nil
+}
+
+func NewRoutingChatTemplate() (prompt.ChatTemplate, error) {
+	return newChatTemplate(GetRoutingPrompt()), nil
+}
+
+func NewImageCollectionChatTemplate() (prompt.ChatTemplate, error) {
+	return newChatTemplate(GetImageCollectionPrompt()), nil
+}
+
+func NewImageCollectionPlanChatTemplate() (prompt.ChatTemplate, error) {
+	return newChatTemplate(GetImageCollectionPlanPrompt()), nil
+}
+
+func NewCodeQualityCheckChatTemplate() (prompt.ChatTemplate, error) {
+	return newChatTemplate(GetCodeQualityCheckPrompt()), nil
+}
+
+func NewChatSummaryChatTemplate() (prompt.ChatTemplate, error) {
+	return newChatTemplate(GetChatSummaryPrompt()), nil
 }
 
 func newChatTemplate(systemPrompt string) prompt.ChatTemplate {
 	ctp := prompt.FromMessages(schema.GoTemplate, []schema.MessagesTemplate{
 		schema.SystemMessage(systemPrompt),
-		schema.MessagesPlaceholder("history", true),
+		schema.MessagesPlaceholder("history", false),
 		schema.UserMessage("{{.content}}"),
 	}...)
 	return ctp

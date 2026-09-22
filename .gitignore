@@ -25,3 +25,13 @@ coverage/
 # Local agent/tooling state
 .agents/
 skills-lock.json
+
+scripts
+docs
+.agents
+
+test
+tests
+resume
+
+tmp

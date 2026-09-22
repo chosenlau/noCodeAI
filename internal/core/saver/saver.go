@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/chosenlau/noCodeAI/config"
-	aimodel "github.com/chosenlau/noCodeAI/internal/ai/ai_model"
+	aimodel "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
 )
 
@@ -23,6 +23,10 @@ func NewCodeSaver() (*CodeSaver, error) {
 	}
 	genPath := path.Join(root, "saves")
 	return &CodeSaver{baseDir: genPath}, nil
+}
+
+func (s *CodeSaver) GetDirPath(codeType enum.CodeGenTypeEnum, appId int64) (string, error) {
+	return s.buildDir(codeType, appId)
 }
 
 // SaveHtml 保存单文件 (HTML)
@@ -42,7 +46,7 @@ func (s *CodeSaver) SaveHtml(appId int64, response *aimodel.HtmlCodeResponse) (s
 	if err := s.writeToFile(dirPath, "index.html", response.HtmlCode); err != nil {
 		return "", err
 	}
-	if err := s.writeToFile(dirPath, "descrition.md", response.Description); err != nil {
+	if err := s.writeToFile(dirPath, "description.md", response.Description); err != nil {
 		return "", err
 	}
 	return dirPath, nil
@@ -71,7 +75,7 @@ func (s *CodeSaver) SaveMultiFile(appId int64, response *aimodel.MultiFileCodeRe
 	if err := s.writeToFile(dirPath, "script.js", response.JsCode); err != nil {
 		return "", err
 	}
-	if err := s.writeToFile(dirPath, "descrition.md", response.Description); err != nil {
+	if err := s.writeToFile(dirPath, "description.md", response.Description); err != nil {
 		return "", err
 	}
 

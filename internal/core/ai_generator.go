@@ -3,7 +3,7 @@ package core
 import (
 	"context"
 
-	aimodel "github.com/chosenlau/noCodeAI/internal/ai/ai_model"
+	aimodel "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
 	"github.com/cloudwego/eino/schema"
 )
 

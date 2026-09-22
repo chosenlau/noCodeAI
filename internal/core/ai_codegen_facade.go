@@ -9,7 +9,9 @@ import (
 
 	"github.com/bytedance/gopkg/util/logger"
 	"github.com/chosenlau/noCodeAI/internal/ai/agent"
-	aimodel "github.com/chosenlau/noCodeAI/internal/ai/ai_model"
+	aimodel "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
+
+	"github.com/chosenlau/noCodeAI/internal/ai/aimodel/aimessage"
 	"github.com/chosenlau/noCodeAI/internal/core/saver"
 
 	"github.com/chosenlau/noCodeAI/pkg/enum"
@@ -32,24 +34,27 @@ func NewNoCodeAIGenFacade(codeGenFactory *agent.CodeGenAgentFactory,
 // processCodeStream 处理代码流式数据并保存
 func (y *NoCodeAIGenFacade) processCodeStream(respStream *schema.StreamReader[*schema.Message], appID int64, typeStr enum.CodeGenTypeEnum) (*schema.StreamReader[*schema.Message], error) {
 	// 先复制流，一个用于处理，一个返回给上游
-	streams := respStream.Copy(2)
-	processingStream := streams[0]
-	returnStream := streams[1]
+	reader, writer := schema.Pipe[*schema.Message](2)
 
 	// 在 goroutine 中处理流数据，不阻塞返回
 	go func() {
 		var builder strings.Builder
-		defer processingStream.Close()
+		defer writer.Close()
 
 		for {
-			chunk, err := processingStream.Recv()
+			chunk, err := respStream.Recv()
 			if err == io.EOF {
 				break
 			}
 			if err != nil {
+				writer.Send(nil, err)
 				return
 			}
+			if chunk == nil {
+				continue
+			}
 			builder.WriteString(chunk.Content)
+			writer.Send(chunk, nil)
 		}
 
 		switch typeStr {
@@ -86,28 +91,162 @@ func (y *NoCodeAIGenFacade) processCodeStream(respStream *schema.StreamReader[*s
 
 	}()
 
-	return returnStream, nil
+	return reader, nil
 }
 
-func (y *NoCodeAIGenFacade) GenCodeStreamAndSave(ctx context.Context, appID int64, userMessage string, typeStr enum.CodeGenTypeEnum) (*schema.StreamReader[*schema.Message], error) {
-	genAgent, err := y.codeGenFactory.GetCodeGenAgent(ctx, appID, typeStr)
-	if err != nil {
-		return nil, err
-	}
+func (y *NoCodeAIGenFacade) GenCodeStreamAndSave(ctx context.Context, appID int64, msg []*schema.Message, typeStr enum.CodeGenTypeEnum) (*schema.StreamReader[*schema.Message], error) {
+
 	switch typeStr {
 	case enum.HtmlCodeGen:
-		streamResp, err := genAgent.GenerateHtmlCodeStream(ctx, userMessage)
+		genAgent := y.codeGenFactory.HtmlAgent
+		streamResp, err := genAgent.GenerateHtmlCodeStream(ctx, msg)
 		if err != nil {
 			return nil, err
 		}
 		return y.processCodeStream(streamResp, appID, typeStr)
 	case enum.MultiFileGen:
-		streamResp, err := genAgent.GenerateMultiFileCodeStream(ctx, userMessage)
+		genAgent := y.codeGenFactory.MultiFileAgent
+		streamResp, err := genAgent.GenerateMultiFileCodeStream(ctx, msg)
 		if err != nil {
 			return nil, err
 		}
 		return y.processCodeStream(streamResp, appID, typeStr)
+	case enum.VueCodeGen:
+		genAgent := y.codeGenFactory.VueAgent
+		streamResp, err := genAgent.GenerateVueProjectCodeStream(ctx, msg)
+		if err != nil {
+			return nil, err
+		}
+		return y.processVueCodeStream(streamResp)
 	default:
 		return nil, fmt.Errorf("不支持的代码生成类型: %s", typeStr)
 	}
+}
+
+func (y *NoCodeAIGenFacade) processVueCodeStream(respStream *schema.StreamReader[*schema.Message]) (*schema.StreamReader[*schema.Message], error) {
+	// 1. 创建通道流
+	reader, writer := schema.Pipe[*schema.Message](2)
+
+	// 2. 异步写入通道流
+	go func() {
+		defer writer.Close()
+
+		// 初始化工具响应缓存 map
+		toolCallsBuffer := make(map[int]*toolCallBuffer)
+		idToIndex := make(map[string]int)
+
+		for {
+			// 消费流
+			msg, err := respStream.Recv()
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				writer.Send(nil, err)
+				return
+			}
+
+			if msg == nil {
+				continue
+			}
+
+			// 💡 修改点 1：使用 Slice 来收集当前循环产生的所有消息
+			// 因为在某些边界情况下，一次接收可能触发多条前端通知
+			var streamMsgs []interface{}
+
+			if len(msg.ToolCalls) > 0 {
+				// 判断是工具请求类型信息 (流式片段组装)
+				for _, tc := range msg.ToolCalls {
+					idx := 0
+					if tc.Index != nil {
+						idx = *tc.Index
+					}
+
+					if _, exists := toolCallsBuffer[idx]; !exists {
+						toolCallsBuffer[idx] = &toolCallBuffer{}
+					}
+					buffer := toolCallsBuffer[idx]
+
+					if tc.ID != "" {
+						buffer.ID = tc.ID
+						idToIndex[tc.ID] = idx
+					}
+					if tc.Function.Name != "" {
+						buffer.Name = tc.Function.Name
+					}
+					buffer.Args += tc.Function.Arguments
+
+					// ⚠️ 警告：依赖 isValidJSON 判断流式参数是否结束依然有风险
+					// 理想情况下，应依赖 msg.ResponseMeta.FinishReason == "tool_calls" 来判定
+					if buffer.ID != "" && buffer.Name != "" && isValidJSON(buffer.Args) && !buffer.SentRequest {
+						streamMsgs = append(streamMsgs, aimessage.NewToolRequestMessage(idx, buffer.ID, buffer.Name, buffer.Args))
+						buffer.SentRequest = true
+					}
+				}
+			} else if msg.Role == schema.Tool {
+				// 工具执行完毕，返回结果
+				toolCallID := msg.ToolCallID
+				arguments := ""
+
+				if idx, exists := idToIndex[toolCallID]; exists {
+					if buffer, ok := toolCallsBuffer[idx]; ok {
+						arguments = buffer.Args
+
+						// 💡 修改点 2：安全兜底
+						// 如果之前 isValidJSON 没拦截成功，在工具真正执行完时，强制补发一条 ToolRequest
+						if !buffer.SentRequest {
+							streamMsgs = append(streamMsgs, aimessage.NewToolRequestMessage(idx, buffer.ID, buffer.Name, buffer.Args))
+							buffer.SentRequest = true
+						}
+					}
+					// 清理缓存
+					delete(toolCallsBuffer, idx)
+					delete(idToIndex, toolCallID)
+				}
+				streamMsgs = append(streamMsgs, aimessage.NewToolExecutedMessage(0, msg.ToolCallID, msg.ToolName, arguments, msg.Content))
+
+			} else if msg.Content != "" {
+				// 判断是 AI 普通文本响应类型信息
+				streamMsgs = append(streamMsgs, aimessage.NewAIResponseMessage(msg.Content))
+			}
+
+			// 💡 修改点 3：遍历发送所有收集到的消息
+			for _, sMsg := range streamMsgs {
+				if sMsg != nil {
+					msgBytes, err := json.Marshal(sMsg)
+					if err != nil {
+						logger.Errorf("序列化消息失败: %v", err)
+						continue // 序列化失败跳过该条，不影响主流程
+					}
+
+					newMsg := &schema.Message{
+						Content: string(msgBytes), // 包装成下游统一格式
+					}
+					writer.Send(newMsg, nil)
+				}
+			}
+		}
+	}()
+
+	return reader, nil
+}
+
+// toolCallBuffer
+// 工具信息缓存
+type toolCallBuffer struct {
+	ID           string
+	Name         string
+	Args         string
+	SentRequest  bool
+	SentExecuted bool
+}
+
+// isValidJSON
+// 校验json格式完整性（工具流式输出的json串不完整，用于校验参数）
+func isValidJSON(s string) bool {
+	if s == "" {
+		return false
+	}
+	var js interface{}
+	return json.Unmarshal([]byte(s), &js) == nil
 }

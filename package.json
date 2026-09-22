@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "test:sse-white-screen": "node tests/e2e/chat_sse_white_screen.js",
+    "test:e2e-full-stack": "node tests/e2e/full_stack_chat_flow.js"
+  },
+  "dependencies": {
+    "puppeteer": "^25.11.0"
+  }
+}

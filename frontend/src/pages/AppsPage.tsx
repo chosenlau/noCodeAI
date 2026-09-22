@@ -36,10 +36,7 @@ export default function AppsPage() {
   const { data: myApps, isLoading, error, refetch } = useQuery({
     queryKey: ['myApps'],
     queryFn: () =>
-      appApi.listMyApps({
-        pageNum: 1,
-        pageSize: 100,
-      }),
+      appApi.listMyApps(),
     retry: false,
   });
 

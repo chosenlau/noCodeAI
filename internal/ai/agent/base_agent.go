@@ -3,14 +3,17 @@ package agent
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"time"
 
 	"github.com/bytedance/gopkg/util/logger"
-	"github.com/chosenlau/noCodeAI/internal/core/store"
+	"github.com/chosenlau/noCodeAI/internal/ai/agent/agentmiddleware"
+	"github.com/chosenlau/noCodeAI/internal/monitor"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
-	"github.com/cloudwego/eino/components/prompt"
 	"github.com/cloudwego/eino/components/tool"
+	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
 
@@ -20,30 +23,40 @@ type ChatModelWrapperAdaptor interface {
 }
 
 type BaseAgent struct {
-	model       model.ToolCallingChatModel
-	modelName   string
-	memoryStore *store.RedisMemoryStore
+	model            model.ToolCallingChatModel
+	modelName        string
+	middleware       *agentmiddleware.AgentMiddleware
+	metricsCollector *monitor.AiModelMetricsCollector
+	checkpointStore  adk.CheckPointStore
 }
 
-func NewBaseAgent(model ChatModelWrapperAdaptor, memoryStore *store.RedisMemoryStore) *BaseAgent {
+func NewBaseAgent(model ChatModelWrapperAdaptor, metricsCollector *monitor.AiModelMetricsCollector, checkpointStore adk.CheckPointStore, agentMiddleware *agentmiddleware.AgentMiddleware) *BaseAgent {
 	return &BaseAgent{
-		model:       model.GetChatModel(),
-		modelName:   model.GetModelName(),
-		memoryStore: memoryStore,
+		model:            model.GetChatModel(),
+		modelName:        model.GetModelName(),
+		metricsCollector: metricsCollector,
+		checkpointStore:  checkpointStore,
+		middleware:       agentMiddleware,
 	}
 }
 
-func (a *BaseAgent) NewAdkAgent(name, description, instruction string, tools []*tool.BaseTool) *adk.ChatModelAgent {
-	ctx := context.Background()
-
+func (a *BaseAgent) NewAdkAgent( name, description, instruction string, tools []tool.BaseTool) *adk.ChatModelAgent {
 	config := &adk.ChatModelAgentConfig{
-		Name:          name,
-		Description:   description,
-		Instruction:   instruction,
-		Model:         a.model,
+		Name:        name,
+		Description: description,
+		Instruction: instruction,
+		Model:       a.model,
+		ToolsConfig: adk.ToolsConfig{
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: tools,
+				UnknownToolsHandler: func(ctx context.Context, name, input string) (string, error) {
+					return fmt.Sprintf("错误: 没有这个名称的工具 %s", name), nil
+				},
+			},
+		},
 		MaxIterations: 50,
 		ModelRetryConfig: &adk.ModelRetryConfig{
-			MaxRetries: 5,
+			MaxRetries: 3,
 			IsRetryAble: func(ctx context.Context, err error) bool {
 				if errors.Is(err, context.Canceled) {
 					return false
@@ -53,28 +66,49 @@ func (a *BaseAgent) NewAdkAgent(name, description, instruction string, tools []*
 		},
 	}
 
+	if a.middleware != nil {
+		config.Handlers = []adk.ChatModelAgentMiddleware{a.middleware}
+	}
+	ctx:=context.Background()
 	agent, err := adk.NewChatModelAgent(ctx, config)
 	if err != nil {
-		logger.Errorf("Agent creation failed: %v", err)
+		logger.Errorf("创建Agent失败: %v", err)
 		return nil
 	}
 	return agent
 }
 
-func (a *BaseAgent) Generate(ctx context.Context, userMessage string, chatTemplate prompt.ChatTemplate, adkAgent *adk.ChatModelAgent) (*schema.Message, error) {
-	format, err := chatTemplate.Format(ctx, map[string]any{
-		"content": userMessage,
-	})
-	if err != nil {
-		return nil, err
+func (a *BaseAgent) Generate(ctx context.Context, messages []*schema.Message, adkAgent *adk.ChatModelAgent) (*schema.Message, error) {
+	monitorContext := monitor.GetMonitorContext(ctx)
+
+	if a.metricsCollector != nil && monitorContext != nil {
+		defer a.metricsCollector.RecordResponseTimeStart(monitorContext.UserId, monitorContext.AppId, a.modelName)()
 	}
 
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+	runnerConfig := adk.RunnerConfig{
 		Agent:           adkAgent,
 		EnableStreaming: false,
-	})
+	}
+	if a.checkpointStore != nil {
+		runnerConfig.CheckPointStore = a.checkpointStore
+	}
 
-	iter := runner.Run(ctx, format)
+	runner := adk.NewRunner(ctx, runnerConfig)
+
+	var iter *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.Message]]
+	if a.checkpointStore != nil {
+		checkpointID, ok := ctx.Value("checkpointID").(string)
+		if !ok || checkpointID == "" {
+			err := errors.New("checkpointID not found in context")
+			if a.metricsCollector != nil && monitorContext != nil {
+				a.metricsCollector.RecordError(monitorContext.UserId, monitorContext.AppId, a.modelName, err.Error())
+			}
+			return nil, err
+		}
+		iter = runner.Run(ctx, messages, adk.WithCheckPointID(checkpointID))
+	} else {
+		iter = runner.Run(ctx, messages)
+	}
 
 	var resultMsg *schema.Message
 	for {
@@ -83,55 +117,88 @@ func (a *BaseAgent) Generate(ctx context.Context, userMessage string, chatTempla
 			break
 		}
 		if event.Err != nil {
+			if a.metricsCollector != nil && monitorContext != nil {
+				a.metricsCollector.RecordError(monitorContext.UserId, monitorContext.AppId, a.modelName, event.Err.Error())
+			}
 			return nil, event.Err
 		}
 		if event.Output != nil && event.Output.MessageOutput != nil {
 			msg, err := event.Output.MessageOutput.GetMessage()
 			if err != nil {
+				if a.metricsCollector != nil && monitorContext != nil {
+					a.metricsCollector.RecordError(monitorContext.UserId, monitorContext.AppId, a.modelName, err.Error())
+				}
 				return nil, err
 			}
 			resultMsg = msg
 		}
 	}
 
+	if a.metricsCollector != nil && monitorContext != nil {
+		a.metricsCollector.RecordRequest(monitorContext.UserId, monitorContext.AppId, a.modelName, "success")
+		if resultMsg != nil && resultMsg.ResponseMeta != nil && resultMsg.ResponseMeta.Usage != nil {
+			tokenUsage := resultMsg.ResponseMeta.Usage
+			a.metricsCollector.RecordTokenUsage(monitorContext.UserId, monitorContext.AppId, a.modelName,
+				"prompt", float64(tokenUsage.PromptTokens))
+			a.metricsCollector.RecordTokenUsage(monitorContext.UserId, monitorContext.AppId, a.modelName,
+				"completion", float64(tokenUsage.CompletionTokens))
+			a.metricsCollector.RecordTokenUsage(monitorContext.UserId, monitorContext.AppId, a.modelName,
+				"total", float64(tokenUsage.PromptTokens+tokenUsage.CompletionTokens))
+		}
+	}
+
 	return resultMsg, nil
 }
 
-func (a *BaseAgent) GenerateStream(ctx context.Context, userMessage string, chatTemplate prompt.ChatTemplate, adkAgent *adk.ChatModelAgent) (*schema.StreamReader[*schema.Message], error) {
-	historyMessage, err := a.memoryStore.GetMessages(ctx)
-	if err != nil {
-		return nil, err
-	}
-	format, err := chatTemplate.Format(ctx, map[string]any{
-		"content": userMessage,
-		"history": historyMessage,
-	})
-	if err != nil {
-		return nil, err
-	}
-	err = a.memoryStore.AppendMessage(ctx, schema.UserMessage(userMessage))
-	if err != nil {
-		return nil, err
-	}
+func (a *BaseAgent) GenerateStream(ctx context.Context, messages []*schema.Message, adkAgent *adk.ChatModelAgent) (*schema.StreamReader[*schema.Message], error) {
+	monitorContext := monitor.GetMonitorContext(ctx)
 
-	runner := adk.NewRunner(ctx, adk.RunnerConfig{
+	runnerConfig := adk.RunnerConfig{
 		Agent:           adkAgent,
 		EnableStreaming: true,
-	})
+	}
+	if a.checkpointStore != nil {
+		runnerConfig.CheckPointStore = a.checkpointStore
+	}
 
-	iter := runner.Run(ctx, format)
+	runner := adk.NewRunner(ctx, runnerConfig)
+
+	var iter *adk.AsyncIterator[*adk.TypedAgentEvent[*schema.Message]]
+	if a.checkpointStore != nil {
+		checkpointID, ok := ctx.Value("checkpointID").(string)
+		if !ok || checkpointID == "" {
+			err := errors.New("checkpointID not found in context")
+			if a.metricsCollector != nil && monitorContext != nil {
+				a.metricsCollector.RecordError(monitorContext.UserId, monitorContext.AppId, a.modelName, err.Error())
+			}
+			return nil, err
+		}
+		iter = runner.Run(ctx, messages, adk.WithCheckPointID(checkpointID))
+	} else {
+		iter = runner.Run(ctx, messages)
+	}
 
 	reader, writer := schema.Pipe[*schema.Message](2)
 
 	go func() {
 		defer writer.Close()
 		var fullContent string
+		var lastTokenUsage *schema.TokenUsage
+		var streamErr error
+
+		startTime := time.Now()
+
 		for {
 			event, ok := iter.Next()
 			if !ok {
 				break
 			}
+
 			if event.Err != nil {
+				streamErr = event.Err
+				if a.metricsCollector != nil && monitorContext != nil {
+					a.metricsCollector.RecordError(monitorContext.UserId, monitorContext.AppId, a.modelName, event.Err.Error())
+				}
 				writer.Send(nil, event.Err)
 				return
 			}
@@ -145,20 +212,41 @@ func (a *BaseAgent) GenerateStream(ctx context.Context, userMessage string, chat
 							break
 						}
 						if err != nil {
+							streamErr = err
+							if a.metricsCollector != nil && monitorContext != nil {
+								a.metricsCollector.RecordError(monitorContext.UserId, monitorContext.AppId, a.modelName, err.Error())
+							}
 							writer.Send(nil, err)
 							return
 						}
 						if msg != nil {
 							fullContent += msg.Content
+							if msg.ResponseMeta != nil && msg.ResponseMeta.Usage != nil {
+								lastTokenUsage = msg.ResponseMeta.Usage
+							}
 							writer.Send(msg, nil)
 						}
 					}
 				}
 			}
 		}
-		err := a.memoryStore.AppendMessage(ctx, schema.AssistantMessage(fullContent, nil))
-		if err != nil {
-			logger.Errorf("保存对话记忆失败: %v", err)
+
+		if a.metricsCollector != nil && monitorContext != nil {
+			duration := time.Since(startTime)
+			a.metricsCollector.RecordResponseTime(monitorContext.UserId, monitorContext.AppId, a.modelName, duration)
+
+			if streamErr == nil {
+				a.metricsCollector.RecordRequest(monitorContext.UserId, monitorContext.AppId, a.modelName, "success")
+
+				if lastTokenUsage != nil {
+					a.metricsCollector.RecordTokenUsage(monitorContext.UserId, monitorContext.AppId, a.modelName,
+						"input", float64(lastTokenUsage.PromptTokens))
+					a.metricsCollector.RecordTokenUsage(monitorContext.UserId, monitorContext.AppId, a.modelName,
+						"output", float64(lastTokenUsage.CompletionTokens))
+					a.metricsCollector.RecordTokenUsage(monitorContext.UserId, monitorContext.AppId, a.modelName,
+						"total", float64(lastTokenUsage.PromptTokens+lastTokenUsage.CompletionTokens))
+				}
+			}
 		}
 	}()
 

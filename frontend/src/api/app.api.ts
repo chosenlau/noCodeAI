@@ -16,6 +16,9 @@ export const appApi = {
   getDetail: (id: string) =>
     api.get('/app/get/vo', { params: { id } }) as Promise<AppVo>,
 
+  getSourceCode: (appId: string, generationType: string) =>
+    api.get(`/app/${appId}/source`, { params: { generationType } }) as Promise<Record<string, string>>,
+
   create: (prompt: string) =>
     api.post('/app/add', { initPrompt: prompt }) as Promise<string>,
 

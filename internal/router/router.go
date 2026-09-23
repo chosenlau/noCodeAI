@@ -48,10 +48,12 @@ func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandle
 		// 公开接口（无需登录）
 		appRoute.POST("/good/list/page/vo", appHandler.ListGoodApp)
 		appRoute.GET("/get/vo", middleware.AuthMiddleware(userService), appHandler.GetAppVo)
+		appRoute.GET("/:appId/source", middleware.AuthMiddleware(userService), appHandler.GetSourceCode)
 
 		// 用户接口（需要登录）
 		appRoute.GET("/my/list/page/vo", middleware.AuthMiddleware(userService), appHandler.ListMyApp)
-		appRoute.GET("/chat", middleware.AuthMiddleware(userService), appHandler.ChatToGenCode)
+		// appRoute.GET("/chat", middleware.AuthMiddleware(userService), appHandler.ChatToGenCode)
+		appRoute.POST("/graph", middleware.AuthMiddleware(userService), appHandler.GraphToGenCode)
 		appRoute.POST("/add", middleware.AuthMiddleware(userService), appHandler.AddApp)
 		appRoute.POST("/update", middleware.AuthMiddleware(userService), appHandler.UpdateApp)
 		appRoute.POST("/delete", middleware.AuthMiddleware(userService), appHandler.DeleteApp)
@@ -68,7 +70,7 @@ func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandle
 		// 需要管理员权限的接口
 		chatHistoryRoute.POST("/admin/list/page/vo", middleware.AuthMiddleware(userService), middleware.DevRequireAdmin(), chatHistoryHandler.ListAllChatHistoryByPageForAdmin)
 
-		chatHistoryRoute.GET("/app/:appId", middleware.AuthMiddleware(userService), chatHistoryHandler.ListAppChatHistory)
+		chatHistoryRoute.GET("/app/:appId", middleware.AuthMiddleware(userService), chatHistoryHandler.ListAppChatHistoryByCursor)
 	}
 	h.GET("/ping", handler.Ping)
 }

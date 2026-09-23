@@ -23,6 +23,7 @@ func (n *PromptEnhancerNode) execute(ctx context.Context, input *state.GraphStat
 	if workflowContext == nil {
 		return nil, fmt.Errorf("WorkFlowContext 为空")
 	}
+	state.NotifyStepStart(workflowContext, "提示词增强")
 
 	originalPrompt := workflowContext.OriginalPrompt
 	imageListStr := workflowContext.ImageListStr

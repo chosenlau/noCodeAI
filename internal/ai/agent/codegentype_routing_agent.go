@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/chosenlau/noCodeAI/internal/ai/prompt"
 	"github.com/chosenlau/noCodeAI/internal/monitor"
@@ -45,5 +48,15 @@ func (a *CodeGenTypeRoutingAgent) RouteCodeGenType(ctx context.Context, messages
 		return "", err
 	}
 
-	return enum.CodeGenTypeEnum(message.Content), nil
+	content := strings.ToLower(strings.TrimSpace(message.Content))
+	for _, codeGenType := range []enum.CodeGenTypeEnum{
+		enum.VueCodeGen,
+		enum.MultiFileGen,
+		enum.HtmlCodeGen,
+	} {
+		if regexp.MustCompile(`\b` + regexp.QuoteMeta(string(codeGenType)) + `\b`).MatchString(content) {
+			return codeGenType, nil
+		}
+	}
+	return "", fmt.Errorf("routing model returned unsupported response: %q", message.Content)
 }

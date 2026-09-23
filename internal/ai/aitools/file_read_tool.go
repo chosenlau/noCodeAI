@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	file "github.com/chosenlau/noCodeAI/pkg/myfile"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 	"os"
 	"path/filepath"
-	file "github.com/chosenlau/noCodeAI/pkg/myfile"
 )
 
 type FileReadToolParams struct {
@@ -43,6 +43,9 @@ func CreateFileReadTool() (*FileReadTool, error) {
 }
 
 func fileReadToolFunc(ctx context.Context, params FileReadToolParams) (*schema.StreamReader[*schema.ToolResult], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	relativePath := params.RelativePath
 	appId := ctx.Value("appId").(int64)
 
@@ -61,6 +64,9 @@ func fileReadToolFunc(ctx context.Context, params FileReadToolParams) (*schema.S
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("文件读取失败: %s, 错误: %v", relativePath, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	fmt.Printf("成功读取文件: %s\n", path)

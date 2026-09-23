@@ -106,6 +106,14 @@ export interface ChatHistoryVo {
 export interface ChatHistoryQueryRequest {
   pageSize?: number;
   lastCreateTime?: string;
+  lastId?: string;
+}
+
+export interface CursorResponse<T> {
+  records: T[];
+  nextCreateTime?: string;
+  nextId?: string;
+  hasMore: boolean;
 }
 
 // ============== SSE 流式响应 ==============

@@ -18,3 +18,10 @@ type NoCodeChatHistoryQueryRequest struct {
 }
 
 type NoCodeChatHistoryQueryResponse response.BaseResponse[response.PageResponse[*model.ChatHistory]]
+
+type CursorResponse struct {
+	Records        []*model.ChatHistory `json:"records"`
+	NextCreateTime time.Time            `json:"nextCreateTime,omitempty"`
+	NextId         int64                `json:"nextId,omitempty"`
+	HasMore        bool                 `json:"hasMore"`
+}

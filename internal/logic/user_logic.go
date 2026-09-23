@@ -175,6 +175,16 @@ func (s *UserService) GetLoginUserVo(ctx context.Context, sessionId string) (*ap
 	return &userVo, nil
 }
 
+func (s *UserService) UserLogout(ctx context.Context, sessionId string, userId int64) error {
+	if sessionId == "" {
+		return nil
+	}
+	if err := s.redisClient.Del(ctx, sessionId).Err(); err != nil {
+		return errorutil.SystemError.WithMessage("Failed to clear login session.")
+	}
+	return nil
+}
+
 func (s *UserService) GetUserByID(ctx context.Context, id int64) (*api.UserVo, error) {
 	if id <= 0 {
 		return nil, errorutil.ParamsError

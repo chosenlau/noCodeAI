@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/bytedance/gopkg/util/logger"
 	"github.com/chosenlau/noCodeAI/internal/ai/agent"
@@ -16,49 +17,46 @@ type RouterNode struct {
 }
 
 func NewRouterNode(routingAgent *agent.CodeGenTypeRoutingAgent) *compose.Lambda {
-	node := &RouterNode{
-		routingAgent: routingAgent,
-	}
-	return compose.InvokableLambda(node.execute)
+	return compose.InvokableLambda((&RouterNode{routingAgent: routingAgent}).execute)
 }
 
 func (n *RouterNode) execute(ctx context.Context, input *state.GraphState) (*state.GraphState, error) {
 	logger.Info("执行节点: 智能路由")
-
 	workflowContext := input.WorkFlowContext
 	if workflowContext == nil {
 		workflowContext = &state.WorkFlowContext{}
+		input.WorkFlowContext = workflowContext
 	}
-
-	originalPrompt := workflowContext.OriginalPrompt
-	if originalPrompt == "" {
-		logger.Warn("原始提示词为空，使用默认HTML类型")
-		input.WorkFlowContext.GenerationType = enum.HtmlCodeGen
+	state.NotifyStepStart(workflowContext, "智能路由")
+	if workflowContext.GenerationType != "" {
+		logger.Infof("已有代码生成类型，跳过 AI 路由: %s", workflowContext.GenerationType)
+		state.NotifyStepCompleted(workflowContext, "智能路由")
 		return input, nil
 	}
-
-	// 构建 messages
-	messages := buildRoutingMessages(originalPrompt)
-	// 调用 agent
-	generationType, err := n.routingAgent.RouteCodeGenType(ctx, messages)
-	if err != nil {
-		logger.Errorf("AI智能路由失败，使用默认HTML类型: %v", err)
-		generationType = enum.HtmlCodeGen
-	} else {
-		logger.Infof("AI智能路由完成，选择类型: %s (%s)", generationType, enum.CodeGenTypeTextMap[generationType])
+	if workflowContext.OriginalPrompt == "" {
+		return nil, fmt.Errorf("original prompt is empty")
+	}
+	if n.routingAgent == nil {
+		return nil, fmt.Errorf("code generation routing agent is not initialized")
 	}
 
-	logger.Infof("路由决策完成，选择类型: %s", enum.CodeGenTypeTextMap[generationType])
-	input.WorkFlowContext.GenerationType = generationType
-	state.NotifyStepCompleted(input.WorkFlowContext, "智能路由")
+	generationType, err := n.routingAgent.RouteCodeGenType(
+		ctx,
+		buildRoutingMessages(workflowContext.OriginalPrompt),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("code generation routing failed: %w", err)
+	}
+	if enum.CodeGenTypeTextMap[generationType] == "" {
+		return nil, fmt.Errorf("unsupported code generation type: %q", generationType)
+	}
+
+	logger.Infof("AI智能路由完成，选择类型: %s (%s)", generationType, enum.CodeGenTypeTextMap[generationType])
+	workflowContext.GenerationType = generationType
+	state.NotifyStepCompleted(workflowContext, "智能路由")
 	return input, nil
 }
 
 func buildRoutingMessages(originalPrompt string) []*schema.Message {
-	return []*schema.Message{
-		{
-			Role:    schema.User,
-			Content: originalPrompt,
-		},
-	}
+	return []*schema.Message{{Role: schema.User, Content: originalPrompt}}
 }

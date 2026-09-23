@@ -28,6 +28,7 @@ func NewCodeGeneratorNode(CodeGenFacade *core.NoCodeAIGenFacade) *compose.Lambda
 }
 
 func (n *CodeGeneratorNode) execute(ctx context.Context, input *state.GraphState) (*state.GraphState, error) {
+	state.NotifyStepStart(input.WorkFlowContext, "代码生成")
 	appID := input.WorkFlowContext.AppID
 	msg := buildCodeGenMessages(input.WorkFlowContext)
 	savePath, err := file.GetCodeOutputRoot()
@@ -38,7 +39,8 @@ func (n *CodeGeneratorNode) execute(ctx context.Context, input *state.GraphState
 	CodeGenType := input.WorkFlowContext.GenerationType
 
 	logger.Info(fmt.Sprintf("%s代码生成", enum.CodeGenTypeTextMap[CodeGenType]))
-	streamResp, err := n.CodeGenFacade.GenCodeStreamAndSave(ctx, appID, msg, CodeGenType)
+	toolCtx := context.WithValue(ctx, "appId", appID)
+	streamResp, err := n.CodeGenFacade.GenCodeStreamAndSave(toolCtx, appID, msg, CodeGenType)
 	if err != nil {
 		logger.Errorf("代码生成失败: %v", err)
 		return nil, fmt.Errorf("代码生成失败: %w", err)
@@ -49,14 +51,13 @@ func (n *CodeGeneratorNode) execute(ctx context.Context, input *state.GraphState
 			break
 		}
 		if err != nil {
-			logger.Errorf("读取代码流失败: %v", err)
-			break
+			return nil, fmt.Errorf("code generation stream read failed: %w", err)
 		}
 		if input.WorkFlowContext.StreamChunkCallback != nil {
-			//回调函数用于将agentturn信息返回给前端
 			input.WorkFlowContext.StreamChunkCallback(chunk.Content)
 		}
 	}
+
 	generatedCodeDir := filepath.Join(savePath, fmt.Sprintf("%s_%d", CodeGenType, appID))
 	logger.Infof("AI 代码生成完成，生成目录: %s", generatedCodeDir)
 	input.WorkFlowContext.GenerateCodeDir = generatedCodeDir
@@ -73,8 +74,6 @@ func buildCodeGenMessages(workflowContext *state.WorkFlowContext) []*schema.Mess
 	if userPrompt == "" {
 		userPrompt = workflowContext.OriginalPrompt
 	}
-
-	// 如果质检失败，追加错误修复提示
 	if isQualityCheckFailed(workflowContext.QualityResult) {
 		userPrompt += buildErrorFixPrompt(workflowContext.QualityResult)
 	}
@@ -91,7 +90,6 @@ func buildCodeGenMessages(workflowContext *state.WorkFlowContext) []*schema.Mess
 			Content: fmt.Sprintf("\n\n可用图片资源：\n%s", workflowContext.ImageListStr),
 		})
 	}
-
 	return messages
 }
 
@@ -101,18 +99,15 @@ func isQualityCheckFailed(qualityResult aimodel.QualityResult) bool {
 
 func buildErrorFixPrompt(qualityResult aimodel.QualityResult) string {
 	prompt := "\n\n## 上次生成的代码存在以下问题，请修复：\n"
-
 	for _, err := range qualityResult.Errors {
 		prompt += fmt.Sprintf("- %s\n", err)
 	}
-
 	if len(qualityResult.Suggestions) > 0 {
 		prompt += "\n## 修复建议：\n"
 		for _, suggestion := range qualityResult.Suggestions {
 			prompt += fmt.Sprintf("- %s\n", suggestion)
 		}
 	}
-
 	prompt += "\n请根据上述问题和建议重新生成代码，确保修复所有提到的问题。"
 	return prompt
 }

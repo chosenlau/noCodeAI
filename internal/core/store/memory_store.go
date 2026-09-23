@@ -6,17 +6,24 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/chosenlau/noCodeAI/internal/dal/model"
 	"github.com/cloudwego/eino/schema"
 	"github.com/redis/go-redis/v9"
 )
 
 // MemoryStore 对话记忆存储接口
 type MemoryStore interface {
-	GetMessages(ctx context.Context,memoryId string) ([]*schema.Message, error)
-	AppendMessage(ctx context.Context, message *schema.Message,memoryId string) error
-	ClearMessages(ctx context.Context,memoryId string) error
+	GetMessages(ctx context.Context, memoryId string) ([]*schema.Message, error)
+	AppendMessage(ctx context.Context, message *schema.Message, memoryId string) error
+	ClearMessages(ctx context.Context, memoryId string) error
 	AddAssistantMessage(ctx context.Context, assistantMsg string, memoryId string) error
 	AddUserMessage(ctx context.Context, userMsg string, memoryId string) error
+}
+
+type HistoryCache interface {
+	GetHistory(ctx context.Context, appID string) ([]*model.ChatHistory, error)
+	SetHistory(ctx context.Context, appID string, records []*model.ChatHistory) error
+	ClearHistory(ctx context.Context, appID string) error
 }
 
 // RedisMemoryStore Redis实现的内存存储
@@ -34,12 +41,12 @@ func NewRedisMemoryStore(redisClient *redis.Client, maxMemoryMessages int, ttl t
 	}
 }
 
-func(r *RedisMemoryStore)AddAssistantMessage(ctx context.Context, assistantMsg string, memoryId string) error {
-	message := schema.AssistantMessage(assistantMsg,nil)
+func (r *RedisMemoryStore) AddAssistantMessage(ctx context.Context, assistantMsg string, memoryId string) error {
+	message := schema.AssistantMessage(assistantMsg, nil)
 	return r.AppendMessage(ctx, message, memoryId)
 }
 
-func(r *RedisMemoryStore)AddUserMessage(ctx context.Context, userMsg string, memoryId string) error {
+func (r *RedisMemoryStore) AddUserMessage(ctx context.Context, userMsg string, memoryId string) error {
 	message := schema.UserMessage(userMsg)
 	return r.AppendMessage(ctx, message, memoryId)
 }
@@ -84,6 +91,35 @@ func (r *RedisMemoryStore) ClearMessages(ctx context.Context, memoryId string) e
 	key := fmt.Sprintf("memory:%s", memoryId)
 	return r.redisClient.Del(ctx, key).Err()
 }
+
+func (r *RedisMemoryStore) GetHistory(ctx context.Context, appID string) ([]*model.ChatHistory, error) {
+	data, err := r.redisClient.Get(ctx, "history:"+appID).Bytes()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var records []*model.ChatHistory
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, err
+	}
+	return records, nil
+}
+
+func (r *RedisMemoryStore) SetHistory(ctx context.Context, appID string, records []*model.ChatHistory) error {
+	data, err := json.Marshal(records)
+	if err != nil {
+		return err
+	}
+	return r.redisClient.Set(ctx, "history:"+appID, data, 24*time.Hour).Err()
+}
+
+func (r *RedisMemoryStore) ClearHistory(ctx context.Context, appID string) error {
+	return r.redisClient.Del(ctx, "history:"+appID).Err()
+}
+
+var _ HistoryCache = (*RedisMemoryStore)(nil)
 
 func encodeMessagesToJSON(msgs *schema.Message) ([]byte, error) {
 	return json.Marshal(msgs)

@@ -17,8 +17,7 @@ type AgentMiddleware struct {
 }
 
 func NewAgentMiddleware(memoryStore store.MemoryStore) *AgentMiddleware {
-	return &AgentMiddleware{
-	}
+	return &AgentMiddleware{}
 }
 
 var (
@@ -154,6 +153,7 @@ func (m *innerModel) wrapOutputStream(inner *schema.StreamReader[*schema.Message
 				return
 			}
 			buffer += msg.Content
+			normalizeEmptyExitToolArguments(msg)
 			if buffer != "" {
 				// if containsSensitiveContent(buffer) {
 				// 	writer.Send(nil, errors.New("检测到敏感信息，输出已中断"))
@@ -165,4 +165,19 @@ func (m *innerModel) wrapOutputStream(inner *schema.StreamReader[*schema.Message
 	}()
 
 	return reader
+}
+
+func normalizeEmptyExitToolArguments(msg *schema.Message) {
+	if msg == nil || len(msg.ToolCalls) == 0 {
+		return
+	}
+	if msg.ResponseMeta == nil || msg.ResponseMeta.FinishReason != "tool_calls" {
+		return
+	}
+	for index := range msg.ToolCalls {
+		toolCall := &msg.ToolCalls[index]
+		if toolCall.Function.Name == "exit" && strings.TrimSpace(toolCall.Function.Arguments) == "" {
+			toolCall.Function.Arguments = "{}"
+		}
+	}
 }

@@ -9,9 +9,13 @@ import (
 	"github.com/chosenlau/noCodeAI/config"
 
 	"github.com/chosenlau/noCodeAI/internal/ai/agent"
+	"github.com/chosenlau/noCodeAI/internal/ai/aitools"
+	"github.com/chosenlau/noCodeAI/internal/ai/graph/node"
+	"github.com/chosenlau/noCodeAI/internal/ai/graph/workflow"
 	"github.com/chosenlau/noCodeAI/internal/ai/llm"
 	"github.com/chosenlau/noCodeAI/internal/core"
 	"github.com/chosenlau/noCodeAI/internal/core/saver"
+	"github.com/chosenlau/noCodeAI/internal/core/store"
 	"github.com/chosenlau/noCodeAI/internal/dal"
 	"github.com/chosenlau/noCodeAI/internal/handler"
 	"github.com/chosenlau/noCodeAI/internal/logic"
@@ -19,6 +23,8 @@ import (
 	"github.com/chosenlau/noCodeAI/internal/service"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/google/wire"
+	"github.com/redis/go-redis/v9"
+	"time"
 )
 
 func ProvideChatModel(cfg *config.Config) (agent.ChatModelWrapperAdaptor, error) {
@@ -30,6 +36,28 @@ func ProvideChatModel(cfg *config.Config) (agent.ChatModelWrapperAdaptor, error)
 	default:
 		return nil, fmt.Errorf("unsupported llm provider: %s", cfg.AI.Provider)
 	}
+}
+
+func ProvideSimpleWorkflow(
+	chatModel agent.ChatModelWrapperAdaptor,
+	aiCodeGenFacade *core.NoCodeAIGenFacade,
+) *workflow.SimpleWorkflow {
+	routingAgent := agent.NewCodeGenTypeRoutingAgent(chatModel, nil, nil)
+	qualityAgent := agent.NewCodeQualityCheckAgent(chatModel, nil, nil)
+	return workflow.NewSimpleWorkflow(
+		node.NewRouterNode(routingAgent),
+		node.NewPromptEnhancerNode(),
+		node.NewCodeGeneratorNode(aiCodeGenFacade),
+		node.NewCodeQualityCheckNode(qualityAgent),
+	)
+}
+
+func ProvideMemoryStore(client *redis.Client) store.MemoryStore {
+	return store.NewRedisMemoryStore(client, 20, 24*time.Hour)
+}
+
+func ProvideToolManager() (*aitools.ToolManager, error) {
+	return aitools.NewToolManager()
 }
 
 var configSet = wire.NewSet(
@@ -79,6 +107,12 @@ func InitializeApp() (*server.Hertz, error) {
 
 		core.NewNoCodeAIGenFacade,
 		saver.NewCodeSaver,
+		agent.NewHtmlCodeGenAgent,
+		agent.NewMultiFileCodeGenAgent,
+		agent.NewVueCodeGenAgent,
 		agent.NewCodeGenAgentFactory,
+		ProvideSimpleWorkflow,
+		ProvideMemoryStore,
+		ProvideToolManager,
 	))
 }

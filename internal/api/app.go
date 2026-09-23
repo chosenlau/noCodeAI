@@ -30,6 +30,11 @@ type NoCodeAppAdminGetResponse response.BaseResponse[AppVo]
 
 type NoCodeAppAdminListResponse response.BaseResponse[response.PageResponse[model.App]]
 
+type NoCodeGenCodeRequest struct {
+	AppId   int64  `json:"appId,string" vd:"$>0"` // 加 string 标签防止大整数精度丢失，vd 标签用于参数校验
+	Message string `json:"message" vd:"len($)>0"`
+}
+
 type NoCodeAppAddRequest struct {
 	InitPrompt string `json:"initPrompt"`
 }

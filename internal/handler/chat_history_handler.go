@@ -84,6 +84,52 @@ func (h *ChatHistoryHandler) ListAppChatHistory(ctx context.Context, c *app.Requ
 	c.JSON(consts.StatusOK, response.NewSuccessResponse[*response.PageResponse[*model.ChatHistory]](result))
 }
 
+func (h *ChatHistoryHandler) ListAppChatHistoryByCursor(ctx context.Context, c *app.RequestContext) {
+	appID, err := strconv.ParseInt(c.Param("appId"), 10, 64)
+	if err != nil {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.ParamsError))
+		return
+	}
+	pageSize := int32(10)
+	if value := c.Query("pageSize"); value != "" {
+		parsed, parseErr := strconv.Atoi(value)
+		if parseErr != nil {
+			c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.ParamsError))
+			return
+		}
+		pageSize = int32(parsed)
+	}
+	var lastCreateTime time.Time
+	if value := c.Query("lastCreateTime"); value != "" {
+		lastCreateTime, err = time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.ParamsError))
+			return
+		}
+	}
+	var lastID int64
+	if value := c.Query("lastId"); value != "" {
+		lastID, err = strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.ParamsError))
+			return
+		}
+	}
+	value, exists := c.Get(constants.UserVoKey)
+	if !exists {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError))
+		return
+	}
+	result, err := h.chatHistoryService.ListAppChatHistoryByCursor(
+		ctx, appID, pageSize, lastCreateTime, lastID, value.(*api.UserVo),
+	)
+	if err != nil {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
+		return
+	}
+	c.JSON(consts.StatusOK, response.NewSuccessResponse[*api.CursorResponse](result))
+}
+
 func (h *ChatHistoryHandler) ListAllChatHistoryByPageForAdmin(ctx context.Context, c *app.RequestContext) {
 	// 1. 绑定请求参数
 	req := &api.NoCodeChatHistoryQueryRequest{}

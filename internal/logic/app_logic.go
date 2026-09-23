@@ -2,20 +2,28 @@ package logic
 
 import (
 	"context"
+	"io"
+	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/bytedance/gopkg/util/logger"
+	graphnode "github.com/chosenlau/noCodeAI/internal/ai/graph/node"
+	"github.com/chosenlau/noCodeAI/internal/ai/graph/state"
+	"github.com/chosenlau/noCodeAI/internal/ai/graph/workflow"
 	"github.com/chosenlau/noCodeAI/internal/api"
 	"github.com/chosenlau/noCodeAI/internal/core"
+	"github.com/chosenlau/noCodeAI/internal/core/store"
 	"github.com/chosenlau/noCodeAI/internal/dal/model"
 	"github.com/chosenlau/noCodeAI/internal/dal/query"
 	"github.com/chosenlau/noCodeAI/internal/service"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/chosenlau/noCodeAI/pkg/errorutil"
+	file "github.com/chosenlau/noCodeAI/pkg/myfile"
 	"github.com/chosenlau/noCodeAI/pkg/response"
 	"github.com/chosenlau/noCodeAI/pkg/snowflake"
 	"github.com/cloudwego/eino/schema"
-	"github.com/redis/go-redis/v9"
 	"gorm.io/gorm"
 )
 
@@ -23,8 +31,34 @@ type AppService struct {
 	aiCodeGenFacade    *core.NoCodeAIGenFacade // AI 代码生成门面
 	userService        service.IUserService    // 用户服务接口
 	chatHistoryService service.IChatHistoryService
-	redisClient        *redis.Client
+	memoryStore        store.MemoryStore
+	simpleWorkflow     *workflow.SimpleWorkflow
+	loadApp            func(context.Context, int64) (*model.App, error)
+	updateArchitecture func(context.Context, int64, string) error
+	updateCodeGenType  func(context.Context, int64, string) error
 	db                 *gorm.DB // 数据库连接
+}
+
+func (s *AppService) GetSourceCode(ctx context.Context, appId int64, generationType string, loginUser *api.UserVo) (map[string]string, error) {
+	if appId <= 0 || loginUser == nil || generationType == "" {
+		return nil, errorutil.ParamsError
+	}
+	app, err := s.loadAppRecord(ctx, appId)
+	if err != nil {
+		return nil, err
+	}
+	if app.UserID != loginUser.ID {
+		return nil, errorutil.NotAuthError
+	}
+	if enum.CodeGenTypeTextMap[enum.CodeGenTypeEnum(generationType)] == "" {
+		return nil, errorutil.ParamsError.WithMessage("unsupported code generation type")
+	}
+	root, err := file.GetCodeOutputRoot()
+	if err != nil {
+		return nil, err
+	}
+	files, _, err := graphnode.ReadCodeFiles(filepath.Join(root, generationType+"_"+strconv.FormatInt(appId, 10)))
+	return files, err
 }
 
 func NewAppService(
@@ -32,19 +66,37 @@ func NewAppService(
 	userService service.IUserService,
 	chatHistoryService service.IChatHistoryService,
 	db *gorm.DB,
-	redisClient *redis.Client,
+	memoryStore store.MemoryStore,
+	simpleWorkflow *workflow.SimpleWorkflow,
 ) *AppService {
 	return &AppService{
 		aiCodeGenFacade:    aiCodeGenFacade,
 		userService:        userService,
 		chatHistoryService: chatHistoryService,
 		db:                 db,
-		redisClient:        redisClient,
+		memoryStore:        memoryStore,
+		simpleWorkflow:     simpleWorkflow,
+		loadApp: func(ctx context.Context, appID int64) (*model.App, error) {
+			q := query.Use(db)
+			return q.App.WithContext(ctx).
+				Where(q.App.ID.Eq(appID), q.App.IsDelete.Eq(0)).
+				First()
+		},
+		updateArchitecture: func(ctx context.Context, appID int64, architecture string) error {
+			q := query.Use(db)
+			_, err := q.App.WithContext(ctx).
+				Where(q.App.ID.Eq(appID), q.App.IsDelete.Eq(0)).
+				Update(q.App.ProjectArchitecture, architecture)
+			return err
+		},
+		updateCodeGenType: func(ctx context.Context, appID int64, codeGenType string) error {
+			q := query.Use(db)
+			_, err := q.App.WithContext(ctx).
+				Where(q.App.ID.Eq(appID), q.App.IsDelete.Eq(0), q.App.CodeGenType.Eq("")).
+				Update(q.App.CodeGenType, codeGenType)
+			return err
+		},
 	}
-}
-
-func appMemoryKey(appID int64) string {
-	return "memory:" + strconv.FormatInt(appID, 10)
 }
 
 func (s *AppService) AddApp(ctx context.Context, req *api.NoCodeAppAddRequest, userId int64) (int64, error) {
@@ -76,7 +128,7 @@ func (s *AppService) AddApp(ctx context.Context, req *api.NoCodeAppAddRequest, u
 		AppName:     appName,
 		InitPrompt:  req.InitPrompt,
 		UserID:      userId,
-		CodeGenType: string(enum.HtmlCodeGen),
+		CodeGenType: "",
 		Priority:    0,
 	}
 
@@ -90,7 +142,7 @@ func (s *AppService) AddApp(ctx context.Context, req *api.NoCodeAppAddRequest, u
 		return 0, err
 	}
 
-	logger.Infof("应用创建成功，ID: %d, 类型: %s", appId, enum.HtmlCodeGen)
+	logger.Infof("应用创建成功，ID: %d，代码生成类型将在首次生成时确定", appId)
 	return newApp.ID, nil
 }
 
@@ -156,8 +208,8 @@ func (s *AppService) DeleteApp(ctx context.Context, id int64, userId int64) (boo
 	if err != nil {
 		return false, err
 	}
-	if s.redisClient != nil {
-		if err := s.redisClient.Del(ctx, appMemoryKey(id)).Err(); err != nil {
+	if s.memoryStore != nil {
+		if err := s.memoryStore.ClearMessages(ctx, strconv.FormatInt(id, 10)); err != nil {
 			return false, errorutil.SystemError.WithMessage("failed to clear app memory")
 		}
 	}
@@ -470,8 +522,8 @@ func (s *AppService) AdminDeleteApp(ctx context.Context, id int64) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	if s.redisClient != nil {
-		if err := s.redisClient.Del(ctx, appMemoryKey(id)).Err(); err != nil {
+	if s.memoryStore != nil {
+		if err := s.memoryStore.ClearMessages(ctx, strconv.FormatInt(id, 10)); err != nil {
 			return false, errorutil.SystemError.WithMessage("failed to clear app memory")
 		}
 	}
@@ -618,7 +670,7 @@ func (s *AppService) ChatToGenCode(ctx context.Context, appId int64, message str
 	}
 
 	// 4. 获取代码生成类型
-	if enum.CodeGenTypeTextMap[enum.CodeGenTypeEnum(app.CodeGenType)] == "" {
+	if app.CodeGenType != "" && enum.CodeGenTypeTextMap[enum.CodeGenTypeEnum(app.CodeGenType)] == "" {
 		return nil, errorutil.ParamsError.WithMessage("应用代码生成类型不支持")
 	}
 
@@ -627,5 +679,199 @@ func (s *AppService) ChatToGenCode(ctx context.Context, appId int64, message str
 		return nil, errorutil.SystemError.WithMessage("failed to save chat history")
 	}
 	// 5. 调用代码生成服务
-	return s.aiCodeGenFacade.GenCodeStreamAndSave(ctx, appId, message, enum.CodeGenTypeEnum(app.CodeGenType))
+	return s.aiCodeGenFacade.GenCodeStreamAndSave(
+		ctx,
+		appId,
+		[]*schema.Message{schema.UserMessage(message)},
+		enum.CodeGenTypeEnum(app.CodeGenType),
+	)
+}
+
+func (s *AppService) GraphToGenCode(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], *state.WorkFlowContext, error) {
+	if message == "" {
+		return nil, nil, errorutil.ParamsError.WithMessage("消息不能为空")
+	}
+	if appId <= 0 || loginUser == nil {
+		return nil, nil, errorutil.ParamsError.WithMessage("应用ID或用户不能为空")
+	}
+	if s.simpleWorkflow == nil {
+		return nil, nil, errorutil.SystemError.WithMessage("工作流未初始化")
+	}
+	if s.memoryStore == nil {
+		return nil, nil, errorutil.SystemError.WithMessage("memory store未初始化")
+	}
+
+	app, err := s.loadAppRecord(ctx, appId)
+	if err != nil {
+		return nil, nil, err
+	}
+	if app.UserID != loginUser.ID {
+		return nil, nil, errorutil.NotAuthError.WithMessage("无权使用该应用")
+	}
+
+	if app.CodeGenType != "" && enum.CodeGenTypeTextMap[enum.CodeGenTypeEnum(app.CodeGenType)] == "" {
+		return nil, nil, errorutil.ParamsError.WithMessage("应用代码生成类型不支持")
+	}
+
+	var unlock func()
+	if locker, ok := s.memoryStore.(store.DistributedLocker); ok {
+		unlock, err = locker.Lock(ctx, strconv.FormatInt(appId, 10))
+		if err != nil {
+			return nil, nil, errorutil.SystemError.WithMessage("failed to acquire application generation lock")
+		}
+	}
+
+	if err := s.chatHistoryService.AddChatMessage(ctx, appId, message, enum.UserMessageType, loginUser.ID); err != nil {
+		if unlock != nil {
+			unlock()
+		}
+		return nil, nil, errorutil.SystemError.WithMessage("failed to save chat history")
+	}
+
+	memoryID := strconv.FormatInt(appId, 10)
+	history, err := s.memoryStore.GetMessages(ctx, memoryID)
+	if err != nil {
+		if unlock != nil {
+			unlock()
+		}
+		return nil, nil, errorutil.SystemError.WithMessage("failed to load workflow memory")
+	}
+	if len(history) == 0 {
+		if _, err := s.chatHistoryService.LoadChatHistoryToMemory(ctx, appId, s.memoryStore, 20); err != nil {
+			if unlock != nil {
+				unlock()
+			}
+			return nil, nil, errorutil.SystemError.WithMessage("failed to load chat history")
+		}
+		history, err = s.memoryStore.GetMessages(ctx, memoryID)
+		if err != nil {
+			if unlock != nil {
+				unlock()
+			}
+			return nil, nil, errorutil.SystemError.WithMessage("failed to reload workflow memory")
+		}
+	}
+	projectArchitecture := app.ProjectArchitecture
+	originalPrompt := buildWorkflowPrompt(history, projectArchitecture, message)
+
+	workflowContext := &state.WorkFlowContext{
+		AppID:          appId,
+		OriginalPrompt: originalPrompt,
+		GenerationType: enum.CodeGenTypeEnum(app.CodeGenType),
+		MaxRetries:     3,
+	}
+
+	stream, err := s.simpleWorkflow.ExecuteStream(ctx, workflowContext)
+	if err != nil {
+		if unlock != nil {
+			unlock()
+		}
+		return nil, nil, err
+	}
+	return s.persistWorkflowContextStream(ctx, stream, workflowContext, appId, loginUser.ID, unlock), workflowContext, nil
+}
+
+func (s *AppService) persistWorkflowContextStream(
+	ctx context.Context,
+	source *schema.StreamReader[*schema.Message],
+	workflowContext *state.WorkFlowContext,
+	appID int64,
+	userID int64,
+	unlock func(),
+) *schema.StreamReader[*schema.Message] {
+	reader, writer := schema.Pipe[*schema.Message](2)
+	go func() {
+		defer source.Close()
+		defer writer.Close()
+		if unlock != nil {
+			defer unlock()
+		}
+		for {
+			message, err := source.Recv()
+			if err == io.EOF {
+				if ctx.Err() != nil {
+					return
+				}
+				if workflowContext.GenerationType != "" && s.updateCodeGenType != nil {
+					if err := s.updateCodeGenType(ctx, appID, string(workflowContext.GenerationType)); err != nil {
+						logger.Errorf("更新代码生成类型失败: %v", err)
+					}
+				}
+				s.saveWorkflowDescription(ctx, workflowContext, appID, userID)
+				return
+			}
+			if err != nil {
+				_ = writer.Send(nil, err)
+				return
+			}
+			if !writer.Send(message, nil) {
+				return
+			}
+		}
+	}()
+	return reader
+}
+
+func (s *AppService) saveWorkflowDescription(ctx context.Context, workflowContext *state.WorkFlowContext, appID, userID int64) {
+	description := strings.TrimSpace(workflowContext.Description)
+	if description != "" {
+		if err := s.chatHistoryService.AddChatMessage(ctx, appID, description, enum.AIMessageType, userID); err != nil {
+			logger.Errorf("保存生成描述到 MySQL 失败: %v", err)
+		}
+		if err := s.memoryStore.AddAssistantMessage(ctx, description, strconv.FormatInt(appID, 10)); err != nil {
+			logger.Errorf("保存生成描述到 memory store 失败: %v", err)
+		}
+	}
+
+	architecture := buildProjectArchitecture(workflowContext.CodeContent)
+	if architecture == "" {
+		return
+	}
+	if err := s.updateAppArchitecture(ctx, appID, architecture); err != nil {
+		logger.Errorf("更新项目架构失败: %v", err)
+	}
+}
+
+func (s *AppService) loadAppRecord(ctx context.Context, appID int64) (*model.App, error) {
+	if s.loadApp == nil {
+		return nil, errorutil.SystemError.WithMessage("应用查询未初始化")
+	}
+	return s.loadApp(ctx, appID)
+}
+
+func (s *AppService) updateAppArchitecture(ctx context.Context, appID int64, architecture string) error {
+	if s.updateArchitecture == nil {
+		return errorutil.SystemError.WithMessage("应用架构更新未初始化")
+	}
+	return s.updateArchitecture(ctx, appID, architecture)
+}
+
+func buildProjectArchitecture(codeContent map[string]string) string {
+	paths := make([]string, 0, len(codeContent))
+	for path := range codeContent {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return strings.Join(paths, "\n")
+}
+
+func buildWorkflowPrompt(history []*schema.Message, architecture, message string) string {
+	var builder strings.Builder
+	if architecture != "" {
+		builder.WriteString("## 项目架构\n")
+		builder.WriteString(architecture)
+		builder.WriteString("\n\n")
+	}
+	for _, item := range history {
+		if item == nil || item.Content == "" {
+			continue
+		}
+		builder.WriteString(string(item.Role))
+		builder.WriteString(": ")
+		builder.WriteString(item.Content)
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\n## 本次用户需求\n")
+	builder.WriteString(message)
+	return builder.String()
 }

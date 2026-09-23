@@ -1,6 +1,10 @@
 package agentmiddleware
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/cloudwego/eino/schema"
+)
 
 func TestValidateInput_RejectsInjectionAndInvalidInput(t *testing.T) {
 	tests := []string{
@@ -38,5 +42,44 @@ func TestValidateOutput_RejectsSensitiveOrTooShortResponse(t *testing.T) {
 func TestValidateOutput_AllowsNormalResponse(t *testing.T) {
 	if err := validateOutput("The generated page contains a responsive navigation bar."); err != nil {
 		t.Fatalf("expected normal output to pass: %v", err)
+	}
+}
+
+func TestNormalizeEmptyExitToolArguments(t *testing.T) {
+	msg := &schema.Message{
+		ToolCalls: []schema.ToolCall{{
+			Function: schema.FunctionCall{Name: "exit"},
+		}},
+		ResponseMeta: &schema.ResponseMeta{FinishReason: "tool_calls"},
+	}
+
+	normalizeEmptyExitToolArguments(msg)
+
+	if msg.ToolCalls[0].Function.Arguments != "{}" {
+		t.Fatalf("expected empty exit arguments to become {}, got %q", msg.ToolCalls[0].Function.Arguments)
+	}
+}
+
+func TestNormalizeEmptyExitToolArgumentsDoesNotChangePartialOrOtherCalls(t *testing.T) {
+	partial := &schema.Message{
+		ToolCalls: []schema.ToolCall{{
+			Function: schema.FunctionCall{Name: "exit"},
+		}},
+		ResponseMeta: &schema.ResponseMeta{FinishReason: ""},
+	}
+	normalizeEmptyExitToolArguments(partial)
+	if partial.ToolCalls[0].Function.Arguments != "" {
+		t.Fatalf("partial tool call should remain unchanged")
+	}
+
+	other := &schema.Message{
+		ToolCalls: []schema.ToolCall{{
+			Function: schema.FunctionCall{Name: "writeFile"},
+		}},
+		ResponseMeta: &schema.ResponseMeta{FinishReason: "tool_calls"},
+	}
+	normalizeEmptyExitToolArguments(other)
+	if other.ToolCalls[0].Function.Arguments != "" {
+		t.Fatalf("other tool arguments should remain unchanged")
 	}
 }

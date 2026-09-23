@@ -37,6 +37,9 @@ func CreateFileWriteTool() (*FileWriteTool, error) {
 }
 
 func fileWriteToolFunc(ctx context.Context, params FileWriteToolParams) (*schema.StreamReader[*schema.ToolResult], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	relativePath := params.RelativePath
 	content := params.Content
 	appId := ctx.Value("appId").(int64)
@@ -64,6 +67,9 @@ func fileWriteToolFunc(ctx context.Context, params FileWriteToolParams) (*schema
 	err := os.WriteFile(path, []byte(content), 0644)
 	if err != nil {
 		return nil, fmt.Errorf("文件写入失败: %s, 错误: %v", relativePath, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	absPath, _ := filepath.Abs(path)

@@ -127,9 +127,9 @@ func TestSimpleWorkflow_FakeGraph_QualityRetryLimit(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = runnable.Invoke(context.Background(), &state.GraphState{WorkFlowContext: workflowContext})
-	require.Error(t, err)
+	require.NoError(t, err)
 	require.Equal(t, 4, facade.calls)
-	require.Contains(t, err.Error(), "quality check failed after 3 retries")
+	require.Contains(t, workflowContext.Description, "## Code quality issues")
 }
 
 func TestSimpleWorkflow_RealLLMGraph(t *testing.T) {

@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	file "github.com/chosenlau/noCodeAI/pkg/myfile"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 	"os"
 	"path/filepath"
 	"strings"
-	file "github.com/chosenlau/noCodeAI/pkg/myfile"
 )
 
 type FileModifyToolParams struct {
@@ -47,6 +47,9 @@ func CreateFileModifyTool() (*FileModifyTool, error) {
 }
 
 func fileModifyToolFunc(ctx context.Context, params FileModifyToolParams) (*schema.StreamReader[*schema.ToolResult], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	relativeFilePath := params.RelativeFilePath
 	oldContent := params.OldContent
 	newContent := params.NewContent
@@ -74,6 +77,9 @@ func fileModifyToolFunc(ctx context.Context, params FileModifyToolParams) (*sche
 	err = os.WriteFile(path, []byte(newFileContent), 0644)
 	if err != nil {
 		return nil, fmt.Errorf("文件写入失败: %s, 错误: %v", relativeFilePath, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	fmt.Printf("成功修改文件: %s\n", path)

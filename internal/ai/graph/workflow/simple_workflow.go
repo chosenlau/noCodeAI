@@ -2,13 +2,15 @@ package workflow
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/bytedance/gopkg/util/logger"
-	"github.com/chosenlau/noCodeAI/internal/ai/graph/node"
+	aimodel "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
 	"github.com/chosenlau/noCodeAI/internal/ai/graph/state"
-	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 )
 
 type SimpleWorkflow struct {
@@ -70,7 +72,11 @@ func (w *SimpleWorkflow) CreateWorkflow(ctx context.Context) (compose.Runnable[*
 					maxRetries = 3
 				}
 				if workflowContext.RetryCount >= maxRetries {
-					return compose.END, fmt.Errorf("quality check failed after %d retries", maxRetries)
+					workflowContext.Description = appendQualityIssues(
+						workflowContext.Description,
+						qualityResult,
+					)
+					return compose.END, nil
 				}
 				workflowContext.RetryCount++
 				logger.Errorf("代码质检失败，需要重新生成代码: %v", qualityResult.Errors)
@@ -94,24 +100,58 @@ func (w *SimpleWorkflow) CreateWorkflow(ctx context.Context) (compose.Runnable[*
 	return runnable, nil
 }
 
+func appendQualityIssues(description string, qualityResult aimodel.QualityResult) string {
+	var builder strings.Builder
+	builder.WriteString(description)
+	if builder.Len() > 0 {
+		builder.WriteString("\n\n")
+	}
+	builder.WriteString("## Code quality issues\n")
+	for _, issue := range qualityResult.Errors {
+		builder.WriteString("- ")
+		builder.WriteString(issue)
+		builder.WriteString("\n")
+	}
+	if len(qualityResult.Suggestions) > 0 {
+		builder.WriteString("\n## Suggestions\n")
+		for _, suggestion := range qualityResult.Suggestions {
+			builder.WriteString("- ")
+			builder.WriteString(suggestion)
+			builder.WriteString("\n")
+		}
+	}
+	return builder.String()
+}
+
 func (w *SimpleWorkflow) Execute(ctx context.Context, originalPrompt string) (*state.WorkFlowContext, error) {
+	return w.ExecuteWithContext(ctx, &state.WorkFlowContext{
+		OriginalPrompt: originalPrompt,
+		CurrentStep:    "初始化",
+		MaxRetries:     3,
+	})
+}
+
+func (w *SimpleWorkflow) ExecuteWithContext(ctx context.Context, workflowContext *state.WorkFlowContext) (*state.WorkFlowContext, error) {
 	runnable, err := w.CreateWorkflow(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	initialContext := &state.WorkFlowContext{
-		OriginalPrompt: originalPrompt,
-		CurrentStep:    "初始化",
-		GenerationType: enum.HtmlCodeGen, // 默认类型
-		MaxRetries:     3,
+	if workflowContext == nil {
+		workflowContext = &state.WorkFlowContext{}
+	}
+	if workflowContext.CurrentStep == "" {
+		workflowContext.CurrentStep = "初始化"
+	}
+	if workflowContext.MaxRetries <= 0 {
+		workflowContext.MaxRetries = 3
 	}
 
-	logger.Infof("初始输入: %s", initialContext.OriginalPrompt)
+	logger.Infof("初始输入: %s", workflowContext.OriginalPrompt)
 	logger.Info("开始执行简化工作流")
 
 	input := &state.GraphState{
-		WorkFlowContext: initialContext,
+		WorkFlowContext: workflowContext,
 	}
 
 	result, err := runnable.Invoke(ctx, input)
@@ -119,29 +159,71 @@ func (w *SimpleWorkflow) Execute(ctx context.Context, originalPrompt string) (*s
 		return nil, fmt.Errorf("执行工作流失败: %w", err)
 	}
 
-	logger.Infof("最终结果: %v", result.WorkFlowContext)
+	workflowResult := result.WorkFlowContext
+	logger.Infof(
+		"工作流完成: appID=%d, step=%s, generationType=%s, files=%d, retry=%d/%d, qualityValid=%t, qualityErrors=%d, descriptionLength=%d",
+		workflowResult.AppID,
+		workflowResult.CurrentStep,
+		workflowResult.GenerationType,
+		len(workflowResult.CodeContent),
+		workflowResult.RetryCount,
+		workflowResult.MaxRetries,
+		workflowResult.QualityResult.IsValid,
+		len(workflowResult.QualityResult.Errors),
+		len(workflowResult.Description),
+	)
 	logger.Info("简化工作流执行完成！")
 
 	return result.WorkFlowContext, nil
 }
 
-// RunSimpleWorkflow 保留旧的测试函数（用于演示）
-func RunSimpleWorkflow() error {
-	ctx := context.Background()
+func (w *SimpleWorkflow) ExecuteStream(ctx context.Context, workflowContext *state.WorkFlowContext) (*schema.StreamReader[*schema.Message], error) {
+	reader, writer := schema.Pipe[*schema.Message](2)
+	workflowContext.StepCallback = func(stepNumber int, currentStep string) {
+		eventType := workflowContext.StepEventType
+		if eventType == "" {
+			eventType = "step_completed"
+		}
+		nextStep := nextWorkflowStep(workflowContext, currentStep)
+		data, err := json.Marshal(map[string]any{
+			"type":        eventType,
+			"stepNumber":  stepNumber,
+			"currentStep": currentStep,
+			"nextStep":    nextStep,
+		})
+		if err == nil {
+			_ = writer.Send(&schema.Message{Content: string(data)}, nil)
+		}
+	}
+	workflowContext.StreamChunkCallback = func(chunk string) {
+		if chunk != "" {
+			_ = writer.Send(&schema.Message{Content: chunk}, nil)
+		}
+	}
+	go func() {
+		defer writer.Close()
+		_, err := w.ExecuteWithContext(ctx, workflowContext)
+		if err != nil {
+			_ = writer.Send(nil, err)
+		}
+	}()
+	return reader, nil
+}
 
-	// 创建测试节点
-	routerNode := node.NewRouterNode(nil) // 需要注入真实 Agent
-	promptEnhancerNode := node.NewPromptEnhancerNode()
-	codeGeneratorNode := node.NewCodeGeneratorNode(nil)   // 需要注入真实 Facade
-	qualityCheckNode := node.NewCodeQualityCheckNode(nil) // 需要注入真实 Agent
-
-	workflow := NewSimpleWorkflow(
-		routerNode,
-		promptEnhancerNode,
-		codeGeneratorNode,
-		qualityCheckNode,
-	)
-
-	_, err := workflow.Execute(ctx, "创建一个简单的个人主页")
-	return err
+func nextWorkflowStep(workflowContext *state.WorkFlowContext, currentStep string) string {
+	switch {
+	case strings.Contains(currentStep, "智能路由"):
+		return "提示词增强"
+	case strings.Contains(currentStep, "提示词增强"):
+		return "代码生成"
+	case strings.Contains(currentStep, "代码生成"):
+		return "代码质量检查"
+	case strings.Contains(currentStep, "代码质量检查"):
+		if workflowContext != nil && !workflowContext.QualityResult.IsValid {
+			return "代码生成"
+		}
+		return "生成完成"
+	default:
+		return "处理中"
+	}
 }

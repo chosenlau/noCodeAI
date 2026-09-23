@@ -10,9 +10,13 @@ import (
 	"fmt"
 	"github.com/chosenlau/noCodeAI/config"
 	"github.com/chosenlau/noCodeAI/internal/ai/agent"
+	"github.com/chosenlau/noCodeAI/internal/ai/aitools"
+	"github.com/chosenlau/noCodeAI/internal/ai/graph/node"
+	"github.com/chosenlau/noCodeAI/internal/ai/graph/workflow"
 	"github.com/chosenlau/noCodeAI/internal/ai/llm"
 	"github.com/chosenlau/noCodeAI/internal/core"
 	"github.com/chosenlau/noCodeAI/internal/core/saver"
+	"github.com/chosenlau/noCodeAI/internal/core/store"
 	"github.com/chosenlau/noCodeAI/internal/dal"
 	"github.com/chosenlau/noCodeAI/internal/handler"
 	"github.com/chosenlau/noCodeAI/internal/logic"
@@ -20,6 +24,7 @@ import (
 	"github.com/chosenlau/noCodeAI/internal/service"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/google/wire"
+	"time"
 )
 
 // Injectors from wire.go:
@@ -34,14 +39,34 @@ func InitializeApp() (*server.Hertz, error) {
 	if err != nil {
 		return nil, err
 	}
-	chatHistoryService := logic.NewChatHistoryService(db)
-	codeGenAgentFactory := agent.NewCodeGenAgentFactory(chatModelWrapperAdaptor, client, chatHistoryService)
+	memoryStore := store.NewRedisMemoryStore(client, 20, 24*time.Hour)
+	chatHistoryService := logic.NewChatHistoryService(db, memoryStore)
+	toolManager, err := aitools.NewToolManager()
+	if err != nil {
+		return nil, err
+	}
+	htmlCodeGenAgent := agent.NewHtmlCodeGenAgent(chatModelWrapperAdaptor, nil, nil, nil)
+	multiFileCodeGenAgent := agent.NewMultiFileCodeGenAgent(chatModelWrapperAdaptor, nil, nil, nil)
+	vueCodeGenAgent := agent.NewVueCodeGenAgent(chatModelWrapperAdaptor, nil, nil, toolManager, nil)
+	codeGenAgentFactory := agent.NewCodeGenAgentFactory(
+		htmlCodeGenAgent,
+		multiFileCodeGenAgent,
+		vueCodeGenAgent,
+	)
 	codeSaver, err := saver.NewCodeSaver()
 	if err != nil {
 		return nil, err
 	}
 	noCodeAIGenFacade := core.NewNoCodeAIGenFacade(codeGenAgentFactory, codeSaver)
-	appService := logic.NewAppService(noCodeAIGenFacade, userService, chatHistoryService, db, client)
+	routingAgent := agent.NewCodeGenTypeRoutingAgent(chatModelWrapperAdaptor, nil, nil)
+	qualityAgent := agent.NewCodeQualityCheckAgent(chatModelWrapperAdaptor, nil, nil)
+	simpleWorkflow := workflow.NewSimpleWorkflow(
+		node.NewRouterNode(routingAgent),
+		node.NewPromptEnhancerNode(),
+		node.NewCodeGeneratorNode(noCodeAIGenFacade),
+		node.NewCodeQualityCheckNode(qualityAgent),
+	)
+	appService := logic.NewAppService(noCodeAIGenFacade, userService, chatHistoryService, db, memoryStore, simpleWorkflow)
 	appHandler := handler.NewAppHandler(appService, userService, chatHistoryService)
 	chatHistoryHandler := handler.NewChatHistoryHandler(chatHistoryService, userService)
 	hertz := initServer(configConfig, userHandler, appHandler, chatHistoryHandler, userService)

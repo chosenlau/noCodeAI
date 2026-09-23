@@ -3,12 +3,11 @@ package saver
 import (
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 
-	"github.com/chosenlau/noCodeAI/config"
 	aimodel "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
+	"github.com/chosenlau/noCodeAI/pkg/myfile"
 )
 
 type CodeSaver struct {
@@ -17,11 +16,10 @@ type CodeSaver struct {
 
 // NewCodeSaver 初始化保存器实例，整个应用生命周期内只需要 New 一次
 func NewCodeSaver() (*CodeSaver, error) {
-	root, err := config.GetProjectRootPath()
+	genPath, err := myfile.GetCodeOutputRoot()
 	if err != nil {
 		return nil, fmt.Errorf("获取存储根目录失败: %w", err)
 	}
-	genPath := path.Join(root, "saves")
 	return &CodeSaver{baseDir: genPath}, nil
 }
 

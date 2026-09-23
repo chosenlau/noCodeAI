@@ -40,7 +40,7 @@ func NewBaseAgent(model ChatModelWrapperAdaptor, metricsCollector *monitor.AiMod
 	}
 }
 
-func (a *BaseAgent) NewAdkAgent( name, description, instruction string, tools []tool.BaseTool) *adk.ChatModelAgent {
+func (a *BaseAgent) NewAdkAgent(name, description, instruction string, tools []tool.BaseTool) *adk.ChatModelAgent {
 	config := &adk.ChatModelAgentConfig{
 		Name:        name,
 		Description: description,
@@ -50,7 +50,7 @@ func (a *BaseAgent) NewAdkAgent( name, description, instruction string, tools []
 			ToolsNodeConfig: compose.ToolsNodeConfig{
 				Tools: tools,
 				UnknownToolsHandler: func(ctx context.Context, name, input string) (string, error) {
-					return fmt.Sprintf("错误: 没有这个名称的工具 %s", name), nil
+					return fmt.Sprintf("閿欒: 娌℃湁杩欎釜鍚嶇О鐨勫伐鍏?%s", name), nil
 				},
 			},
 		},
@@ -69,10 +69,10 @@ func (a *BaseAgent) NewAdkAgent( name, description, instruction string, tools []
 	if a.middleware != nil {
 		config.Handlers = []adk.ChatModelAgentMiddleware{a.middleware}
 	}
-	ctx:=context.Background()
+	ctx := context.Background()
 	agent, err := adk.NewChatModelAgent(ctx, config)
 	if err != nil {
-		logger.Errorf("创建Agent失败: %v", err)
+		logger.Errorf("鍒涘缓Agent澶辫触: %v", err)
 		return nil
 	}
 	return agent
@@ -112,6 +112,9 @@ func (a *BaseAgent) Generate(ctx context.Context, messages []*schema.Message, ad
 
 	var resultMsg *schema.Message
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		event, ok := iter.Next()
 		if !ok {
 			break
@@ -189,6 +192,11 @@ func (a *BaseAgent) GenerateStream(ctx context.Context, messages []*schema.Messa
 		startTime := time.Now()
 
 		for {
+			if err := ctx.Err(); err != nil {
+				streamErr = err
+				_ = writer.Send(nil, err)
+				return
+			}
 			event, ok := iter.Next()
 			if !ok {
 				break
@@ -207,6 +215,11 @@ func (a *BaseAgent) GenerateStream(ctx context.Context, messages []*schema.Messa
 				stream := event.Output.MessageOutput.MessageStream
 				if stream != nil {
 					for {
+						if err := ctx.Err(); err != nil {
+							streamErr = err
+							_ = writer.Send(nil, err)
+							return
+						}
 						msg, err := stream.Recv()
 						if err == io.EOF {
 							break
@@ -224,7 +237,9 @@ func (a *BaseAgent) GenerateStream(ctx context.Context, messages []*schema.Messa
 							if msg.ResponseMeta != nil && msg.ResponseMeta.Usage != nil {
 								lastTokenUsage = msg.ResponseMeta.Usage
 							}
-							writer.Send(msg, nil)
+							if !writer.Send(msg, nil) {
+								return
+							}
 						}
 					}
 				}

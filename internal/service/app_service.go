@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 
+	"github.com/chosenlau/noCodeAI/internal/ai/graph/state"
 	"github.com/chosenlau/noCodeAI/internal/api"
 	"github.com/chosenlau/noCodeAI/internal/dal/model"
 	"github.com/chosenlau/noCodeAI/pkg/response"
@@ -10,7 +11,8 @@ import (
 )
 
 type IAppService interface {
-	ChatToGenCode(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], error)
+	GraphToGenCode(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], *state.WorkFlowContext, error)
+	GetSourceCode(ctx context.Context, appId int64, generationType string, loginUser *api.UserVo) (map[string]string, error)
 	AddApp(ctx context.Context, req *api.NoCodeAppAddRequest, userId int64) (int64, error)
 	UpdateApp(ctx context.Context, req *api.NoCodeAppUpdateRequest, userId int64) (bool, error)
 	DeleteApp(ctx context.Context, id int64, userId int64) (bool, error)

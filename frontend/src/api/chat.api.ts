@@ -1,7 +1,7 @@
 import type {
   ChatHistoryVo,
   ChatHistoryQueryRequest,
-  PageResult,
+  CursorResponse,
 } from '@/types/api';
 import api from './config';
 
@@ -10,5 +10,5 @@ export const chatApi = {
     appId: string,
     params: ChatHistoryQueryRequest
   ) =>
-    api.get(`/chatHistory/app/${appId}`, { params }) as Promise<PageResult<ChatHistoryVo>>,
+    api.get(`/chatHistory/app/${appId}`, { params }) as Promise<CursorResponse<ChatHistoryVo>>,
 };

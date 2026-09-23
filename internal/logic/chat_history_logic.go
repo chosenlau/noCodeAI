@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,13 +24,85 @@ import (
 )
 
 type ChatHistoryService struct {
-	db *gorm.DB
+	db          *gorm.DB
+	memoryStore store.MemoryStore
 }
 
-func NewChatHistoryService(db *gorm.DB) *ChatHistoryService {
+func NewChatHistoryService(db *gorm.DB, memoryStore store.MemoryStore) *ChatHistoryService {
 	return &ChatHistoryService{
-		db: db,
+		db: db, memoryStore: memoryStore,
 	}
+}
+
+func (s *ChatHistoryService) ListAppChatHistoryByCursor(
+	ctx context.Context,
+	appId int64,
+	pageSize int32,
+	lastCreateTime time.Time,
+	lastID int64,
+	loginUser *api.UserVo,
+) (*api.CursorResponse, error) {
+	if appId <= 0 || pageSize <= 0 || pageSize > 50 {
+		return nil, errorutil.ParamsError
+	}
+	if loginUser == nil {
+		return nil, errorutil.NotLoginError
+	}
+
+	q := query.Use(s.db)
+	app, err := q.App.WithContext(ctx).Where(q.App.ID.Eq(appId), q.App.IsDelete.Eq(0)).First()
+	if err != nil {
+		return nil, err
+	}
+	if app.UserID != loginUser.ID && loginUser.UserRole != string(enum.RoleAdmin) {
+		return nil, errorutil.NotAuthError
+	}
+
+	var records []*model.ChatHistory
+	cache, ok := s.memoryStore.(store.HistoryCache)
+	if ok {
+		records, err = cache.GetHistory(ctx, strconv.FormatInt(appId, 10))
+		if err != nil {
+			return nil, err
+		}
+	}
+	if records == nil {
+		records, err = q.ChatHistory.WithContext(ctx).
+			Where(q.ChatHistory.AppID.Eq(appId), q.ChatHistory.IsDelete.Eq(0)).
+			Where(q.ChatHistory.MessageType.Neq(string(enum.SummaryMessageType))).
+			Order(q.ChatHistory.CreateTime.Desc(), q.ChatHistory.ID.Desc()).
+			Limit(1000).Find()
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			_ = cache.SetHistory(ctx, strconv.FormatInt(appId, 10), records)
+		}
+	}
+
+	filtered := make([]*model.ChatHistory, 0, len(records))
+	for _, record := range records {
+		if !lastCreateTime.IsZero() &&
+			(record.CreateTime.After(lastCreateTime) ||
+				(record.CreateTime.Equal(lastCreateTime) && record.ID >= lastID)) {
+			continue
+		}
+		filtered = append(filtered, record)
+		if len(filtered) > int(pageSize) {
+			break
+		}
+	}
+	hasMore := len(filtered) > int(pageSize)
+	if hasMore {
+		filtered = filtered[:pageSize]
+	}
+	result := &api.CursorResponse{Records: filtered, HasMore: hasMore}
+	if len(filtered) > 0 {
+		last := filtered[len(filtered)-1]
+		result.NextCreateTime = last.CreateTime
+		result.NextId = last.ID
+	}
+	return result, nil
 }
 
 func (s *ChatHistoryService) ListAppChatHistoryByPage(ctx context.Context,
@@ -116,6 +189,9 @@ func (s *ChatHistoryService) DeleteByAppId(ctx context.Context, appId int64) err
 	if err != nil {
 		return err
 	}
+	if cache, ok := s.memoryStore.(store.HistoryCache); ok {
+		_ = cache.ClearHistory(ctx, strconv.FormatInt(appId, 10))
+	}
 
 	return nil
 }
@@ -175,6 +251,9 @@ func (s *ChatHistoryService) AddChatMessage(ctx context.Context, appId int64,
 	})
 	if err != nil {
 		return err
+	}
+	if cache, ok := s.memoryStore.(store.HistoryCache); ok {
+		_ = cache.ClearHistory(ctx, strconv.FormatInt(appId, 10))
 	}
 
 	// 5. 当对话轮次达到20轮且为AI消息时，异步生成总结
@@ -333,7 +412,7 @@ func (s *ChatHistoryService) LoadChatHistoryToMemory(
 	}
 
 	// 4. 清理旧缓存
-	if err := memoryStore.ClearMessages(ctx); err != nil {
+	if err := memoryStore.ClearMessages(ctx, strconv.FormatInt(appId, 10)); err != nil {
 		return 0, err
 	}
 
@@ -341,7 +420,7 @@ func (s *ChatHistoryService) LoadChatHistoryToMemory(
 
 	// 5. 组装环节一：如果有摘要，必须【最先】塞入 Redis 作为底座（System Message）
 	if summaryMsg != nil {
-		err = memoryStore.AppendMessage(ctx, schema.SystemMessage(summaryMsg.Message))
+		err = memoryStore.AppendMessage(ctx, schema.SystemMessage(summaryMsg.Message), strconv.FormatInt(appId, 10))
 		if err != nil {
 			return loadedCount, err
 		}
@@ -362,7 +441,7 @@ func (s *ChatHistoryService) LoadChatHistoryToMemory(
 			continue // 脏数据跳过
 		}
 
-		if err := memoryStore.AppendMessage(ctx, msg); err != nil {
+		if err := memoryStore.AppendMessage(ctx, msg, strconv.FormatInt(appId, 10)); err != nil {
 			return loadedCount, err
 		}
 		loadedCount++

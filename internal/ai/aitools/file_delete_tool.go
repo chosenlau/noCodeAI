@@ -44,6 +44,9 @@ func CreateFileDeleteTool() (*FileDeleteTool, error) {
 }
 
 func fileDeleteToolFunc(ctx context.Context, params FileDeleteToolParams) (*schema.StreamReader[*schema.ToolResult], error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	relativePath := params.RelativePath
 	appId := ctx.Value("appId").(int64)
 
@@ -66,6 +69,9 @@ func fileDeleteToolFunc(ctx context.Context, params FileDeleteToolParams) (*sche
 	err := os.Remove(path)
 	if err != nil {
 		return nil, fmt.Errorf("文件删除失败: %s, 错误: %v", relativePath, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	fmt.Printf("成功删除文件: %s\n", path)

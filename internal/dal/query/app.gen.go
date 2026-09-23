@@ -32,6 +32,7 @@ func newApp(db *gorm.DB, opts ...gen.DOOption) app {
 	_app.AppName = field.NewString(tableName, "appName")
 	_app.Cover = field.NewString(tableName, "cover")
 	_app.InitPrompt = field.NewString(tableName, "initPrompt")
+	_app.ProjectArchitecture = field.NewString(tableName, "projectArchitecture")
 	_app.CodeGenType = field.NewString(tableName, "codeGenType")
 	_app.DeployKey = field.NewString(tableName, "deployKey")
 	_app.DeployedTime = field.NewTime(tableName, "deployedTime")
@@ -51,20 +52,21 @@ func newApp(db *gorm.DB, opts ...gen.DOOption) app {
 type app struct {
 	appDo appDo
 
-	ALL          field.Asterisk
-	ID           field.Int64  // id
-	AppName      field.String // 应用名称
-	Cover        field.String // 应用封面
-	InitPrompt   field.String // 应用初始化的 prompt
-	CodeGenType  field.String // 代码生成类型（枚举）
-	DeployKey    field.String // 部署标识
-	DeployedTime field.Time   // 部署时间
-	Priority     field.Int32  // 优先级
-	UserID       field.Int64  // 创建用户id
-	EditTime     field.Time   // 编辑时间
-	CreateTime   field.Time   // 创建时间
-	UpdateTime   field.Time   // 更新时间
-	IsDelete     field.Int32  // 是否删除
+	ALL                 field.Asterisk
+	ID                  field.Int64  // id
+	AppName             field.String // 应用名称
+	Cover               field.String // 应用封面
+	InitPrompt          field.String // 应用初始化的 prompt
+	ProjectArchitecture field.String // 项目架构
+	CodeGenType         field.String // 代码生成类型（枚举）
+	DeployKey           field.String // 部署标识
+	DeployedTime        field.Time   // 部署时间
+	Priority            field.Int32  // 优先级
+	UserID              field.Int64  // 创建用户id
+	EditTime            field.Time   // 编辑时间
+	CreateTime          field.Time   // 创建时间
+	UpdateTime          field.Time   // 更新时间
+	IsDelete            field.Int32  // 是否删除
 
 	fieldMap map[string]field.Expr
 }
@@ -85,6 +87,7 @@ func (a *app) updateTableName(table string) *app {
 	a.AppName = field.NewString(table, "appName")
 	a.Cover = field.NewString(table, "cover")
 	a.InitPrompt = field.NewString(table, "initPrompt")
+	a.ProjectArchitecture = field.NewString(table, "projectArchitecture")
 	a.CodeGenType = field.NewString(table, "codeGenType")
 	a.DeployKey = field.NewString(table, "deployKey")
 	a.DeployedTime = field.NewTime(table, "deployedTime")
@@ -118,11 +121,12 @@ func (a *app) GetFieldByName(fieldName string) (field.OrderExpr, bool) {
 }
 
 func (a *app) fillFieldMap() {
-	a.fieldMap = make(map[string]field.Expr, 13)
+	a.fieldMap = make(map[string]field.Expr, 14)
 	a.fieldMap["id"] = a.ID
 	a.fieldMap["appName"] = a.AppName
 	a.fieldMap["cover"] = a.Cover
 	a.fieldMap["initPrompt"] = a.InitPrompt
+	a.fieldMap["projectArchitecture"] = a.ProjectArchitecture
 	a.fieldMap["codeGenType"] = a.CodeGenType
 	a.fieldMap["deployKey"] = a.DeployKey
 	a.fieldMap["deployedTime"] = a.DeployedTime

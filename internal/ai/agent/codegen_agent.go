@@ -215,7 +215,41 @@ func ParseCodeResponse(raw []byte) []byte {
 		}
 	}
 
+	if html := extractRawHTML(cleaned); len(html) > 0 {
+		return marshalCodeResponse(map[string]string{
+			"html_code": string(html),
+		})
+	}
+
 	return cleaned
+}
+
+func extractRawHTML(raw []byte) []byte {
+	if bytes.Contains(raw, []byte("```")) {
+		return nil
+	}
+
+	lower := strings.ToLower(string(raw))
+	candidates := []string{"<!doctype html", "<html", "<main", "<body", "<section", "<div"}
+	start := -1
+	for _, candidate := range candidates {
+		if index := strings.Index(lower, candidate); index >= 0 && (start < 0 || index < start) {
+			start = index
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+
+	html := bytes.TrimSpace(raw[start:])
+	if !bytes.Contains(bytes.ToLower(html), []byte("</html>")) &&
+		!bytes.Contains(bytes.ToLower(html), []byte("</main>")) &&
+		!bytes.Contains(bytes.ToLower(html), []byte("</body>")) &&
+		!bytes.Contains(bytes.ToLower(html), []byte("</section>")) &&
+		!bytes.Contains(bytes.ToLower(html), []byte("</div>")) {
+		return nil
+	}
+	return html
 }
 
 var codeFenceRegex = regexp.MustCompile("(?s)```[ \\t]*([A-Za-z0-9_-]*)[ \\t]*\\r?\\n(.*?)```")

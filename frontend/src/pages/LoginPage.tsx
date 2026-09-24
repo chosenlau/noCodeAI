@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { useLocation, useNavigate, Link } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
 import { userApi } from '@/api';
 import { useAuthStore } from '@/store/auth';
@@ -19,6 +19,7 @@ import type { User, LoginRequest } from '@/types/api';
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const setUser = useAuthStore((state) => state.setUser);
   const [userAccount, setUserAccount] = useState('');
   const [userPassword, setUserPassword] = useState('');
@@ -31,7 +32,13 @@ export default function LoginPage() {
         title: '登录成功',
         description: `欢迎回来，${user.userName}`,
       });
-      navigate('/apps');
+      const pendingPrompt = (
+        location.state as { pendingPrompt?: string } | null
+      )?.pendingPrompt;
+      navigate('/', {
+        state: pendingPrompt ? { pendingPrompt } : null,
+        replace: true,
+      });
     },
     onError: (error: ApiError) => {
       toast({

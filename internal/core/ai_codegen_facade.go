@@ -23,6 +23,13 @@ type NoCodeAIGenFacade struct {
 	codeSaver      *saver.CodeSaver
 }
 
+func (y *NoCodeAIGenFacade) SavedCodeDir(codeType enum.CodeGenTypeEnum, appID int64) (string, error) {
+	if y == nil || y.codeSaver == nil {
+		return "", fmt.Errorf("code saver is not initialized")
+	}
+	return y.codeSaver.SavedDirPath(codeType, appID)
+}
+
 func NewNoCodeAIGenFacade(codeGenFactory *agent.CodeGenAgentFactory,
 	codeSaver *saver.CodeSaver) *NoCodeAIGenFacade {
 	return &NoCodeAIGenFacade{
@@ -39,6 +46,7 @@ func (y *NoCodeAIGenFacade) processCodeStream(ctx context.Context, respStream *s
 		defer writer.Close()
 		defer respStream.Close()
 
+		downstreamClosed := false
 		for {
 			if err := ctx.Err(); err != nil {
 				_ = writer.Send(nil, err)
@@ -56,8 +64,8 @@ func (y *NoCodeAIGenFacade) processCodeStream(ctx context.Context, respStream *s
 				continue
 			}
 			builder.WriteString(chunk.Content)
-			if !writer.Send(chunk, nil) {
-				return
+			if !downstreamClosed {
+				downstreamClosed = writer.Send(chunk, nil)
 			}
 		}
 
@@ -228,7 +236,7 @@ func (y *NoCodeAIGenFacade) processVueCodeStream(ctx context.Context, respStream
 					logger.Errorf("failed to serialize stream message: %v", err)
 					continue
 				}
-				if !writer.Send(&schema.Message{Content: string(msgBytes)}, nil) {
+				if writer.Send(&schema.Message{Content: string(msgBytes)}, nil) {
 					return
 				}
 			}

@@ -65,6 +65,21 @@ export interface AppVo {
   user: User;
   createTime: string;
   updateTime: string;
+  tokenUsage: number;
+  promptTokens: number;
+  completionTokens: number;
+  memory: MemoryVo;
+}
+
+export interface MemoryVo {
+  summary: string;
+  round: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  summarizing: boolean;
+  summaryError: string;
+  updatedAt: string;
 }
 
 export interface CreateAppRequest {

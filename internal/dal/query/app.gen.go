@@ -33,6 +33,9 @@ func newApp(db *gorm.DB, opts ...gen.DOOption) app {
 	_app.Cover = field.NewString(tableName, "cover")
 	_app.InitPrompt = field.NewString(tableName, "initPrompt")
 	_app.ProjectArchitecture = field.NewString(tableName, "projectArchitecture")
+	_app.PromptTokens = field.NewInt64(tableName, "promptTokens")
+	_app.CompletionTokens = field.NewInt64(tableName, "completionTokens")
+	_app.TokenUsage = field.NewInt64(tableName, "tokenUsage")
 	_app.CodeGenType = field.NewString(tableName, "codeGenType")
 	_app.DeployKey = field.NewString(tableName, "deployKey")
 	_app.DeployedTime = field.NewTime(tableName, "deployedTime")
@@ -58,6 +61,9 @@ type app struct {
 	Cover               field.String // 应用封面
 	InitPrompt          field.String // 应用初始化的 prompt
 	ProjectArchitecture field.String // 项目架构
+	PromptTokens        field.Int64  // 提示词 Token 消耗量
+	CompletionTokens    field.Int64  // 生成内容 Token 消耗量
+	TokenUsage          field.Int64  // Token 消耗总量
 	CodeGenType         field.String // 代码生成类型（枚举）
 	DeployKey           field.String // 部署标识
 	DeployedTime        field.Time   // 部署时间
@@ -88,6 +94,9 @@ func (a *app) updateTableName(table string) *app {
 	a.Cover = field.NewString(table, "cover")
 	a.InitPrompt = field.NewString(table, "initPrompt")
 	a.ProjectArchitecture = field.NewString(table, "projectArchitecture")
+	a.PromptTokens = field.NewInt64(table, "promptTokens")
+	a.CompletionTokens = field.NewInt64(table, "completionTokens")
+	a.TokenUsage = field.NewInt64(table, "tokenUsage")
 	a.CodeGenType = field.NewString(table, "codeGenType")
 	a.DeployKey = field.NewString(table, "deployKey")
 	a.DeployedTime = field.NewTime(table, "deployedTime")
@@ -121,12 +130,15 @@ func (a *app) GetFieldByName(fieldName string) (field.OrderExpr, bool) {
 }
 
 func (a *app) fillFieldMap() {
-	a.fieldMap = make(map[string]field.Expr, 14)
+	a.fieldMap = make(map[string]field.Expr, 17)
 	a.fieldMap["id"] = a.ID
 	a.fieldMap["appName"] = a.AppName
 	a.fieldMap["cover"] = a.Cover
 	a.fieldMap["initPrompt"] = a.InitPrompt
 	a.fieldMap["projectArchitecture"] = a.ProjectArchitecture
+	a.fieldMap["promptTokens"] = a.PromptTokens
+	a.fieldMap["completionTokens"] = a.CompletionTokens
+	a.fieldMap["tokenUsage"] = a.TokenUsage
 	a.fieldMap["codeGenType"] = a.CodeGenType
 	a.fieldMap["deployKey"] = a.DeployKey
 	a.fieldMap["deployedTime"] = a.DeployedTime

@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/bytedance/gopkg/util/logger"
 	"github.com/chosenlau/noCodeAI/internal/ai/agent"
@@ -15,6 +16,8 @@ import (
 type RouterNode struct {
 	routingAgent *agent.CodeGenTypeRoutingAgent
 }
+
+const routingTimeout = 90 * time.Second
 
 func NewRouterNode(routingAgent *agent.CodeGenTypeRoutingAgent) *compose.Lambda {
 	return compose.InvokableLambda((&RouterNode{routingAgent: routingAgent}).execute)
@@ -40,11 +43,17 @@ func (n *RouterNode) execute(ctx context.Context, input *state.GraphState) (*sta
 		return nil, fmt.Errorf("code generation routing agent is not initialized")
 	}
 
+	routingCtx, cancel := context.WithTimeout(ctx, routingTimeout)
+	defer cancel()
+	logger.Infof("starting AI code generation routing, timeout=%s", routingTimeout)
 	generationType, err := n.routingAgent.RouteCodeGenType(
-		ctx,
+		routingCtx,
 		buildRoutingMessages(workflowContext.OriginalPrompt),
 	)
 	if err != nil {
+		if routingCtx.Err() != nil {
+			return nil, fmt.Errorf("code generation routing timed out after %s: %w", routingTimeout, routingCtx.Err())
+		}
 		return nil, fmt.Errorf("code generation routing failed: %w", err)
 	}
 	if enum.CodeGenTypeTextMap[generationType] == "" {

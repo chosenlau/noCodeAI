@@ -13,12 +13,13 @@ function App() {
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
+        <Route path="/" element={<AppsPage />} />
         <Route element={<ProtectedRoute />}>
           <Route path="/apps" element={<AppsPage />} />
           <Route path="/chat/:appId" element={<ChatPage />} />
           <Route path="/debug/:appId" element={<ChatPageDebug />} />
         </Route>
-        <Route path="/" element={<Navigate to="/apps" replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
       <Toaster />
     </>

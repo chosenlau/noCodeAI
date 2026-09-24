@@ -1,10 +1,23 @@
 ﻿import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, CheckCircle2, ChevronDown, Loader2, Send, Wrench } from 'lucide-react';
+import {
+  ArrowLeft,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  FileText,
+  Folder,
+  FolderOpen,
+  Loader2,
+  Info,
+  Send,
+  Wrench,
+} from 'lucide-react';
 import Editor from '@monaco-editor/react';
 import { SandpackPreview, SandpackProvider } from '@codesandbox/sandpack-react';
 import { appApi, chatApi } from '@/api';
+import logoUrl from '@/assets/NoCodeAI.svg';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -12,6 +25,18 @@ import { toast } from '@/hooks/use-toast';
 import type { ChatHistoryVo } from '@/types/api';
 
 type GeneratedFiles = Record<string, string>;
+
+interface FileTreeNode {
+  name: string;
+  path: string;
+  type: 'file' | 'folder';
+  children: FileTreeNode[];
+}
+
+interface MutableFileTreeNode extends FileTreeNode {
+  childMap?: Map<string, MutableFileTreeNode>;
+  children: MutableFileTreeNode[];
+}
 
 interface WorkflowStep {
   stepNumber: number;
@@ -24,6 +49,126 @@ interface ToolEvent {
   name: string;
   arguments?: string;
   result?: string;
+}
+
+interface WorkflowTask {
+  runningStep: WorkflowStep | null;
+  completedStep: WorkflowStep | null;
+  toolEvents: ToolEvent[];
+  description: string;
+  descriptionStreaming: boolean;
+  status: string;
+  isGenerating: boolean;
+  elapsedSeconds: number;
+}
+
+function normalizeGeneratedFiles(value: unknown): GeneratedFiles {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  const files: GeneratedFiles = {};
+  for (const [fileName, content] of Object.entries(value)) {
+    if (typeof content === 'string') {
+      files[fileName] = content;
+    }
+  }
+  return files;
+}
+
+function buildFileTree(files: GeneratedFiles): FileTreeNode[] {
+  const root: MutableFileTreeNode = {
+    name: '',
+    path: '',
+    type: 'folder',
+    children: [],
+    childMap: new Map(),
+  };
+
+  for (const filePath of Object.keys(files).sort((a, b) => a.localeCompare(b))) {
+    const parts = filePath.replace(/\\/g, '/').split('/').filter(Boolean);
+    let current = root;
+    const pathParts: string[] = [];
+
+    parts.forEach((part, index) => {
+      const isFile = index === parts.length - 1;
+      pathParts.push(part);
+      const path = pathParts.join('/');
+
+      if (isFile) {
+        current.children.push({
+          name: part,
+          path: filePath,
+          type: 'file',
+          children: [],
+        });
+        return;
+      }
+
+      let folder = current.childMap?.get(part);
+      if (!folder) {
+        folder = {
+          name: part,
+          path,
+          type: 'folder',
+          children: [],
+          childMap: new Map(),
+        };
+        current.childMap?.set(part, folder);
+        current.children.push(folder);
+      }
+      current = folder;
+    });
+  }
+
+  const sortTree = (nodes: MutableFileTreeNode[]): FileTreeNode[] =>
+    nodes
+      .sort((left, right) => {
+        if (left.type !== right.type) {
+          return left.type === 'folder' ? -1 : 1;
+        }
+        return left.name.localeCompare(right.name, undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        });
+      })
+      .map(({ childMap: _childMap, ...node }) => ({
+        ...node,
+        children: sortTree(node.children),
+      }));
+
+  return sortTree(root.children);
+}
+
+function collectFolderPaths(nodes: FileTreeNode[]): string[] {
+  return nodes.flatMap((node) => {
+    if (node.type !== 'folder') {
+      return [];
+    }
+    return [node.path, ...collectFolderPaths(node.children)];
+  });
+}
+
+function buildStaticPreview(files: GeneratedFiles): string {
+  let html = files['index.html'] ?? '';
+  const css = files['style.css'] ?? '';
+  const js = files['script.js'] ?? '';
+
+  if (css) {
+    const styleTag = `<style>${css}</style>`;
+    html = /<\/head>/i.test(html)
+      ? html.replace(/<\/head>/i, `${styleTag}</head>`)
+      : `${styleTag}${html}`;
+  }
+
+  if (js) {
+    const scriptTag = `<script>${js.replace(/<\/script/gi, '<\\/script')}</script>`;
+    html = /<\/body>/i.test(html)
+      ? html.replace(/<\/body>/i, `${scriptTag}</body>`)
+      : `${html}${scriptTag}`;
+  }
+
+  return html;
 }
 
 function getSandpackFiles(files: GeneratedFiles): Record<string, string> {
@@ -67,28 +212,251 @@ function normalizePackageJSON(content: string): string {
   return JSON.stringify(packageJSON, null, 2);
 }
 
+interface WorkflowTaskCardProps {
+  task: WorkflowTask;
+  elapsedSeconds: number;
+  expanded: boolean;
+  onToggleTools: () => void;
+}
+
+interface FileTreeProps {
+  nodes: FileTreeNode[];
+  selectedFile: string;
+  expandedFolders: Set<string>;
+  onToggleFolder: (path: string) => void;
+  onSelectFile: (path: string) => void;
+  depth?: number;
+}
+
+function FileTree({
+  nodes,
+  selectedFile,
+  expandedFolders,
+  onToggleFolder,
+  onSelectFile,
+  depth = 0,
+}: FileTreeProps) {
+  return (
+    <div className={depth === 0 ? 'space-y-0.5' : undefined}>
+      {nodes.map((node) => {
+        const paddingLeft = 6 + depth * 14;
+
+        if (node.type === 'folder') {
+          const expanded = expandedFolders.has(node.path);
+          return (
+            <div key={node.path}>
+              <button
+                type="button"
+                className="flex h-7 w-full min-w-0 items-center gap-1 rounded px-1.5 text-left text-sm hover:bg-muted"
+                style={{ paddingLeft }}
+                onClick={() => onToggleFolder(node.path)}
+                aria-expanded={expanded}
+                title={node.path}
+              >
+                <ChevronRight
+                  className={`h-3.5 w-3.5 shrink-0 transition-transform ${
+                    expanded ? 'rotate-90' : ''
+                  }`}
+                />
+                {expanded ? (
+                  <FolderOpen className="h-3.5 w-3.5 shrink-0 text-primary" />
+                ) : (
+                  <Folder className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                )}
+                <span className="min-w-0 truncate">{node.name}</span>
+              </button>
+              {expanded && (
+                <FileTree
+                  nodes={node.children}
+                  selectedFile={selectedFile}
+                  expandedFolders={expandedFolders}
+                  onToggleFolder={onToggleFolder}
+                  onSelectFile={onSelectFile}
+                  depth={depth + 1}
+                />
+              )}
+            </div>
+          );
+        }
+
+        return (
+          <button
+            key={node.path}
+            type="button"
+            className={`flex h-7 w-full min-w-0 items-center gap-1.5 rounded px-1.5 text-left text-sm ${
+              selectedFile === node.path
+                ? 'bg-primary text-primary-foreground'
+                : 'hover:bg-muted'
+            }`}
+            style={{ paddingLeft: paddingLeft + 18 }}
+            onClick={() => onSelectFile(node.path)}
+            title={node.path}
+          >
+            <FileText className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 truncate">{node.name}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function WorkflowTaskCard({
+  task,
+  elapsedSeconds,
+  expanded,
+  onToggleTools,
+}: WorkflowTaskCardProps) {
+  const currentStep = task.runningStep?.currentStep;
+  const completedStep = task.completedStep;
+  const displayStatus = task.isGenerating
+    ? currentStep
+      ? `正在${currentStep}`
+      : '正在准备生成'
+    : task.status;
+  const displayElapsed = task.isGenerating ? elapsedSeconds : task.elapsedSeconds;
+
+  return (
+    <Card className="relative overflow-hidden border-primary/30 bg-primary/5 p-4">
+      <div className="absolute inset-x-0 top-0 h-1 overflow-hidden bg-primary/10">
+        <div
+          className={`h-full bg-primary transition-all duration-700 ${
+            task.isGenerating ? 'animate-pulse' : ''
+          }`}
+          style={{
+            width: `${task.isGenerating
+              ? Math.min(92, 18 + (completedStep?.stepNumber ?? 0) * 18)
+              : 100}%`,
+          }}
+        />
+      </div>
+      <div className="flex items-center justify-between gap-2 text-sm font-medium">
+        <div className="flex min-w-0 items-center gap-2">
+          {task.isGenerating ? (
+            <span className="h-2.5 w-2.5 shrink-0 animate-ping rounded-full bg-primary" />
+          ) : (
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-green-600" />
+          )}
+          <span className="truncate">{displayStatus}</span>
+          {task.isGenerating && (
+            <span className="inline-flex w-7 text-left">
+              <span className="animate-pulse">...</span>
+            </span>
+          )}
+        </div>
+        <span className="font-mono text-xs text-muted-foreground">
+          {displayElapsed}s
+        </span>
+      </div>
+      {(task.runningStep || completedStep) && (
+        <div className="mt-2 text-xs text-muted-foreground">
+          工作流步骤 {task.runningStep?.stepNumber ?? completedStep?.stepNumber}
+          {completedStep && task.isGenerating && ` · 已完成：${completedStep.currentStep}`}
+        </div>
+      )}
+      {task.toolEvents.length > 0 && (
+        <div className="mt-3 border-t border-primary/10 pt-3">
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-2 text-left text-xs font-medium"
+            onClick={onToggleTools}
+            aria-expanded={expanded}
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <Wrench className="h-3.5 w-3.5 shrink-0 text-primary" />
+              <span className="truncate">工具调用过程（{task.toolEvents.length}）</span>
+              {task.isGenerating && (
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+              )}
+            </span>
+            <ChevronDown
+              className={`h-4 w-4 shrink-0 transition-transform ${
+                expanded ? 'rotate-180' : ''
+              }`}
+            />
+          </button>
+          {expanded && (
+            <div className="mt-3 max-h-52 space-y-2 overflow-y-auto">
+              {task.toolEvents.map((toolEvent, index) => (
+                <div
+                  key={`${toolEvent.name}-${index}`}
+                  className="flex items-start gap-2 text-xs"
+                >
+                  {toolEvent.type === 'tool_executed' ? (
+                    <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 text-green-600" />
+                  ) : (
+                    <Loader2 className="mt-0.5 h-3.5 w-3.5 animate-spin text-primary" />
+                  )}
+                  <div className="min-w-0">
+                    <div className="font-medium">{toolEvent.name}</div>
+                    {toolEvent.type === 'tool_executed' && toolEvent.result && (
+                      <pre className="mt-1 max-h-20 overflow-auto whitespace-pre-wrap text-muted-foreground">
+                        {toolEvent.result}
+                      </pre>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      {task.description && (
+        <div className="mt-3 border-t border-primary/10 pt-3">
+          <div className="mb-2 text-xs font-medium text-muted-foreground">
+            生成说明
+          </div>
+          <pre className="whitespace-pre-wrap text-sm font-sans">{task.description}</pre>
+          {task.descriptionStreaming && <span className="ml-1 animate-pulse">▍</span>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export default function ChatPage() {
   const { appId } = useParams<{ appId: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const [message, setMessage] = useState('');
   const [chatHistory, setChatHistory] = useState<ChatHistoryVo[]>([]);
   const [generatedCode, setGeneratedCode] = useState('');
   const [generatedFiles, setGeneratedFiles] = useState<GeneratedFiles>({});
   const [selectedFile, setSelectedFile] = useState('');
-  const [runningStep, setRunningStep] = useState<WorkflowStep | null>(null);
-  const [completedStep, setCompletedStep] = useState<WorkflowStep | null>(null);
-  const [description, setDescription] = useState('');
-  const [descriptionStreaming, setDescriptionStreaming] = useState(false);
-  const [toolEvents, setToolEvents] = useState<ToolEvent[]>([]);
-  const [toolEventsExpanded, setToolEventsExpanded] = useState(false);
+  const [workflowTasks, setWorkflowTasks] = useState<Record<string, WorkflowTask>>({});
+  const [thinkingMessageIds, setThinkingMessageIds] = useState<Set<string>>(new Set());
+  const [expandedTaskIds, setExpandedTaskIds] = useState<Set<string>>(new Set());
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const [activeTaskId, setActiveTaskId] = useState('');
   const [activePanel, setActivePanel] = useState<'source' | 'preview'>('preview');
   const [isGenerating, setIsGenerating] = useState(false);
+  const [useGraph, setUseGraph] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [chatPaneWidth, setChatPaneWidth] = useState(50);
-  const [fileListWidth, setFileListWidth] = useState(176);
+  const [fileListWidth, setFileListWidth] = useState(220);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const generationStartedRef = useRef(false);
+  const mountedRef = useRef(false);
+  const initialPrompt = (
+    location.state as { initialPrompt?: string } | null
+  )?.initialPrompt;
   const sandpackFiles = useMemo(() => getSandpackFiles(generatedFiles), [generatedFiles]);
+  const fileTree = useMemo(() => buildFileTree(generatedFiles), [generatedFiles]);
+  const activeTask = activeTaskId ? workflowTasks[activeTaskId] : undefined;
+
+  const updateWorkflowTask = (
+    taskId: string,
+    patch: Partial<WorkflowTask>,
+  ) => {
+    setWorkflowTasks((previous) => ({
+      ...previous,
+      [taskId]: {
+        ...previous[taskId],
+        ...patch,
+      },
+    }));
+  };
 
   const startChatPaneResize = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
@@ -121,6 +489,23 @@ export default function ChatPage() {
     window.addEventListener('pointerup', handleUp);
   };
 
+  const handleToggleFolder = (path: string) => {
+    setExpandedFolders((previous) => {
+      const next = new Set(previous);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectFile = (fileName: string) => {
+    setSelectedFile(fileName);
+    setGeneratedCode(generatedFiles[fileName]);
+  };
+
   const appQuery = useQuery({
     queryKey: ['app', appId],
     queryFn: () => appApi.getDetail(appId!),
@@ -133,19 +518,23 @@ export default function ChatPage() {
   });
   const sourceCodeQuery = useQuery({
     queryKey: ['sourceCode', appId, appQuery.data?.codeGenType],
-    queryFn: () => appApi.getSourceCode(appId!, appQuery.data!.codeGenType),
-    enabled: activePanel === 'source' && !!appId && !!appQuery.data?.codeGenType,
+    queryFn: () => appApi.getSourceCode(appId!, appQuery.data?.codeGenType ?? ''),
+    enabled: activePanel === 'source' && !!appId && !!appQuery.data,
   });
 
   useEffect(() => {
     if (activePanel === 'source' && sourceCodeQuery.data) {
-      const files = sourceCodeQuery.data;
+      const files = normalizeGeneratedFiles(sourceCodeQuery.data);
       const firstFile = Object.keys(files)[0] ?? '';
       setGeneratedFiles(files);
       setSelectedFile((current) => current && files[current] ? current : firstFile);
       setGeneratedCode((current) => current || (firstFile ? files[firstFile] : ''));
     }
   }, [activePanel, sourceCodeQuery.data]);
+
+  useEffect(() => {
+    setExpandedFolders(new Set(collectFolderPaths(fileTree)));
+  }, [fileTree]);
 
   useEffect(() => {
     if (historyQuery.data?.records && chatHistory.length === 0) {
@@ -157,7 +546,21 @@ export default function ChatPage() {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatHistory]);
 
-  useEffect(() => () => abortControllerRef.current?.abort(), []);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const controller = abortControllerRef.current;
+      window.setTimeout(() => {
+        if (
+          !mountedRef.current &&
+          abortControllerRef.current === controller
+        ) {
+          controller?.abort();
+        }
+      }, 0);
+    };
+  }, []);
 
   useEffect(() => {
     if (!isGenerating) {
@@ -171,30 +574,12 @@ export default function ChatPage() {
     return () => window.clearInterval(timer);
   }, [isGenerating]);
 
-  const addAssistantStatus = (id: string, status: string) => {
-    setChatHistory((previous) => {
-      const existing = previous.find((item) => item.id === id);
-      if (existing) {
-        return previous.map((item) => item.id === id ? { ...item, message: status } : item);
-      }
-      return [...previous, {
-        id,
-        message: status,
-        messageType: 'ai',
-        appId: appId ?? '',
-        userId: '',
-        turnNumber: previous.length + 1,
-        createTime: new Date().toISOString(),
-        updateTime: new Date().toISOString(),
-        isDelete: 0,
-      }];
-    });
-  };
-
-  const handleSendMessage = async () => {
-    const trimmedMessage = message.trim();
+  const handleSendMessage = async (requestedMessage?: string) => {
+    const trimmedMessage = (requestedMessage ?? message).trim();
     if (!trimmedMessage || !appId || isGenerating) return;
 
+    const taskId = `workflow-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const isGraphRequest = useGraph;
     setChatHistory((previous) => [...previous, {
       id: Date.now().toString(),
       message: trimmedMessage,
@@ -205,35 +590,62 @@ export default function ChatPage() {
       createTime: new Date().toISOString(),
       updateTime: new Date().toISOString(),
       isDelete: 0,
+    }, {
+      id: taskId,
+      message: '',
+      messageType: 'ai',
+      appId,
+      userId: '',
+      turnNumber: previous.length + 2,
+      createTime: new Date().toISOString(),
+      updateTime: new Date().toISOString(),
+      isDelete: 0,
     }]);
+    if (isGraphRequest) {
+      setWorkflowTasks((previous) => ({
+        ...previous,
+        [taskId]: {
+          runningStep: null,
+          completedStep: null,
+          toolEvents: [],
+          description: '',
+          descriptionStreaming: false,
+          status: '正在准备生成',
+          isGenerating: true,
+          elapsedSeconds: 0,
+        },
+      }));
+    } else {
+      setThinkingMessageIds((previous) => new Set(previous).add(taskId));
+    }
+    setActiveTaskId(taskId);
     setMessage('');
     setIsGenerating(true);
-    setRunningStep(null);
-    setCompletedStep(null);
-    setDescription('');
-    setDescriptionStreaming(false);
-    setToolEvents([]);
-    setToolEventsExpanded(false);
     setGeneratedFiles({});
     setSelectedFile('');
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
-    const assistantId = `${Date.now()}-assistant`;
 
     try {
-      const baseUrl = import.meta.env.PROD
-        ? import.meta.env.VITE_API_BASE_URL
-        : window.location.origin;
-      const response = await fetch(new URL('/app/graph', baseUrl), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({ appId, message: trimmedMessage }),
-        signal: controller.signal,
-      });
+      const response = isGraphRequest
+        ? await chatApi.generateCode(appId, trimmedMessage, controller.signal)
+        : await chatApi.chatWithAgent(appId, trimmedMessage, controller.signal);
       if (!response.ok || !response.body) {
-        throw new Error(`浠ｇ爜鐢熸垚璇锋眰澶辫触 (${response.status})`);
+        throw new Error(`请求失败 (${response.status})`);
+      }
+      const contentType = response.headers.get('content-type') ?? '';
+      if (!contentType.includes('text/event-stream')) {
+        const body = await response.text();
+        try {
+          const payload = JSON.parse(body) as { message?: string };
+          throw new Error(payload.message || '服务端返回了非 SSE 响应');
+        } catch (error) {
+          if (error instanceof Error && error.message !== '服务端返回了非 SSE 响应') {
+            throw error;
+          }
+          throw new Error(body || '服务端返回了非 SSE 响应');
+        }
       }
 
       const reader = response.body.getReader();
@@ -255,55 +667,83 @@ export default function ChatPage() {
             .filter((line) => line.startsWith('data:'))
             .map((line) => line.slice(5).replace(/^ /, ''))
             .join('\n');
-          if (eventName === 'step_started') {
+          if (!isGraphRequest && eventName === 'message') {
+            const assistantText = data;
+            setThinkingMessageIds((previous) => {
+              const next = new Set(previous);
+              next.delete(taskId);
+              return next;
+            });
+            setChatHistory((previous) => {
+              const last = previous[previous.length - 1];
+              if (!last || last.id !== taskId) return previous;
+              return [...previous.slice(0, -1), { ...last, message: `${last.message}${assistantText}` }];
+            });
+          } else if (eventName === 'step_started') {
             const step = JSON.parse(data) as WorkflowStep;
             if (step.currentStep) {
-              setRunningStep(step);
-              addAssistantStatus(assistantId, `正在${step.currentStep}`);
+              updateWorkflowTask(taskId, {
+                runningStep: step,
+                status: `正在${step.currentStep}`,
+              });
             }
           } else if (eventName === 'step_completed') {
             const step = JSON.parse(data) as WorkflowStep;
             if (step.currentStep) {
-              setCompletedStep(step);
+              const patch: Partial<WorkflowTask> = { completedStep: step };
               if (step.nextStep) {
-                setRunningStep({ ...step, currentStep: step.nextStep });
-                addAssistantStatus(assistantId, `正在${step.nextStep}`);
+                patch.runningStep = { ...step, currentStep: step.nextStep };
+                patch.status = `正在${step.nextStep}`;
               }
+              updateWorkflowTask(taskId, patch);
             }
-          } else if (eventName === 'tool_request' || eventName === 'tool_executed') {            const toolEvent = JSON.parse(data) as ToolEvent;
-            setToolEvents((previous) => {
-              const next = [...previous];
-              const index = next.findIndex(
+          } else if (eventName === 'tool_request' || eventName === 'tool_executed') {
+            const toolEvent = JSON.parse(data) as ToolEvent;
+            setWorkflowTasks((previous) => {
+              const task = previous[taskId];
+              if (!task) return previous;
+              const nextToolEvents = [...task.toolEvents];
+              const index = nextToolEvents.findIndex(
                 (item) => item.type === 'tool_request' && item.name === toolEvent.name,
               );
               if (eventName === 'tool_executed' && index >= 0) {
-                next[index] = toolEvent;
-                return next;
+                nextToolEvents[index] = toolEvent;
+              } else {
+                nextToolEvents.push(toolEvent);
               }
-              return [...next, toolEvent];
+              return {
+                ...previous,
+                [taskId]: {
+                  ...task,
+                  toolEvents: nextToolEvents,
+                  status: eventName === 'tool_executed'
+                    ? `工具 ${toolEvent.name} 执行完成`
+                    : `正在调用工具 ${toolEvent.name}`,
+                },
+              };
             });
-            addAssistantStatus(
-              assistantId,
-              eventName === 'tool_executed'
-                ? `宸ュ叿 ${toolEvent.name} 鎵ц瀹屾垚`
-                : `姝ｅ湪璋冪敤宸ュ叿 ${toolEvent.name}`,
-            );
           } else if (eventName === 'code_completed') {
-            const files = JSON.parse(data) as GeneratedFiles;
+            const files = normalizeGeneratedFiles(JSON.parse(data) as unknown);
             const fileNames = Object.keys(files);
             const firstFile = fileNames[0] ?? '';
             setGeneratedFiles(files);
             setSelectedFile(firstFile);
             setGeneratedCode(firstFile ? files[firstFile] : '');
-            addAssistantStatus(assistantId, `代码生成完成，共 ${Object.keys(files).length} 个文件`);
+            updateWorkflowTask(taskId, {
+              status: `代码文件已生成，共 ${Object.keys(files).length} 个`,
+            });
           } else if (eventName === 'description_completed') {
-            setDescriptionStreaming(true);
-            setDescription('');
+            updateWorkflowTask(taskId, {
+              descriptionStreaming: true,
+              description: '',
+            });
             for (let index = 0; index <= data.length; index += 1) {
               await new Promise((resolve) => window.setTimeout(resolve, 12));
-              setDescription(data.slice(0, index));
+              updateWorkflowTask(taskId, {
+                description: data.slice(0, index),
+              });
             }
-            setDescriptionStreaming(false);
+            updateWorkflowTask(taskId, { descriptionStreaming: false });
           } else if (eventName === 'error') {
             const errorMessage = data || '代码生成失败';
             if (errorMessage.includes('lock') || errorMessage.includes('锁')) {
@@ -316,7 +756,27 @@ export default function ChatPage() {
           }
         }
       }
-      addAssistantStatus(assistantId, '代码生成完成');
+      // Some browsers report stream completion immediately after the final
+      // SSE frame. ChatAgent has no payload after the assistant message, so
+      // the closed response is a valid completion for this mode.
+      if (!finished && !isGraphRequest) {
+        finished = true;
+      }
+      if (!finished) {
+        throw new Error('生成连接提前结束，未收到完成信号');
+      }
+      if (isGraphRequest) {
+        updateWorkflowTask(taskId, {
+          status: '代码生成流程完成',
+          isGenerating: false,
+          elapsedSeconds,
+        });
+      }
+      setThinkingMessageIds((previous) => {
+        const next = new Set(previous);
+        next.delete(taskId);
+        return next;
+      });
     } catch (error) {
       if (!(error instanceof DOMException && error.name === 'AbortError')) {
         toast({
@@ -330,8 +790,44 @@ export default function ChatPage() {
     } finally {
       abortControllerRef.current = null;
       setIsGenerating(false);
+      void appQuery.refetch();
+      if (isGraphRequest) {
+        updateWorkflowTask(taskId, {
+          isGenerating: false,
+          elapsedSeconds,
+        });
+      }
+      setThinkingMessageIds((previous) => {
+        const next = new Set(previous);
+        next.delete(taskId);
+        return next;
+      });
     }
   };
+
+  useEffect(() => {
+    if (
+      !initialPrompt?.trim() ||
+      !appId ||
+      !appQuery.data ||
+      !historyQuery.isSuccess ||
+      generationStartedRef.current
+    ) {
+      return;
+    }
+
+    generationStartedRef.current = true;
+    navigate(location.pathname, { replace: true, state: null });
+    void handleSendMessage(initialPrompt);
+  }, [
+    appId,
+    appQuery.data,
+    handleSendMessage,
+    historyQuery.isSuccess,
+    initialPrompt,
+    location.pathname,
+    navigate,
+  ]);
 
   const queryError = appQuery.error || historyQuery.error;
   if (queryError) {
@@ -361,94 +857,114 @@ export default function ChatPage() {
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <h1 className="text-lg font-semibold">{appQuery.data?.appName || '未命名应用'}</h1>
-        {completedStep && <span className="text-sm text-muted-foreground">已完成：{completedStep.currentStep}</span>}
+        <details className="relative ml-auto">
+          <summary className="flex cursor-pointer list-none items-center gap-1 rounded-md px-2 py-1 text-sm text-muted-foreground hover:bg-muted">
+            <Info className="h-4 w-4" />
+            信息
+          </summary>
+          <div className="absolute right-0 top-9 z-20 w-72 rounded-lg border bg-background p-3 text-xs shadow-lg">
+            <div className="mb-2 font-medium">Memory</div>
+            <div>Summary: {appQuery.data?.memory?.summary || 'None'}</div>
+            <div>Round: {appQuery.data?.memory?.round ?? 0}</div>
+            <div>Prompt tokens: {appQuery.data?.memory?.promptTokens ?? 0}</div>
+            <div>Completion tokens: {appQuery.data?.memory?.completionTokens ?? 0}</div>
+            <div>Total tokens: {appQuery.data?.memory?.totalTokens ?? 0}</div>
+            <div>Status: {appQuery.data?.memory?.summarizing ? 'Summarizing' : 'Idle'}</div>
+            {appQuery.data?.memory?.summaryError && (
+              <div className="mt-1 text-destructive">
+                Error: {appQuery.data.memory.summaryError}
+              </div>
+            )}
+          </div>
+        </details>
+        {activeTask?.completedStep && (
+          <span className="text-sm text-muted-foreground">
+            已完成：{activeTask.completedStep.currentStep}
+          </span>
+        )}
       </header>
       <div className="flex-1 flex overflow-hidden">
         <div className="min-w-0 flex flex-col border-r" style={{ width: `${chatPaneWidth}%` }}>
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
-            {isGenerating && (
-              <Card className="relative overflow-hidden border-primary/30 bg-primary/5 p-4">
-                <div className="absolute inset-x-0 top-0 h-1 overflow-hidden bg-primary/10">
-                  <div
-                    className="h-full animate-pulse bg-primary transition-all duration-700"
-                    style={{ width: `${Math.min(92, 18 + (completedStep?.stepNumber ?? 0) * 18)}%` }}
-                  />
-                </div>
-                <div className="flex items-center justify-between gap-2 text-sm font-medium">
-                  <div className="flex items-center gap-2">
-                    <span className="h-2.5 w-2.5 animate-ping rounded-full bg-primary" />
-                    <span>{runningStep ? `正在${runningStep.currentStep}` : '正在准备生成'}</span>
-                    <span className="inline-flex w-7 text-left">
-                      <span className="animate-pulse">...</span>
-                    </span>
+            {chatHistory.map((item) => {
+              const task = workflowTasks[item.id];
+              if (task) {
+                return (
+                  <div key={item.id} className="flex justify-start">
+                    <div className="max-w-[90%] flex-1">
+                      <WorkflowTaskCard
+                        task={task}
+                        elapsedSeconds={elapsedSeconds}
+                        expanded={expandedTaskIds.has(item.id)}
+                        onToggleTools={() => {
+                          setExpandedTaskIds((previous) => {
+                            const next = new Set(previous);
+                            if (next.has(item.id)) {
+                              next.delete(item.id);
+                            } else {
+                              next.add(item.id);
+                            }
+                            return next;
+                          });
+                        }}
+                      />
+                    </div>
                   </div>
-                  <span className="font-mono text-xs text-muted-foreground">{elapsedSeconds}s</span>
-                </div>
-                {(runningStep || completedStep) && (
-                  <div className="mt-2 text-xs text-muted-foreground">
-                    工作流步骤 {runningStep?.stepNumber ?? completedStep?.stepNumber}
-                  </div>
-                )}
-              </Card>
-            )}
-            {toolEvents.length > 0 && (
-              <Card className="border-primary/20 bg-muted/40 p-3 animate-in fade-in slide-in-from-bottom-2 duration-300">
-                <button
-                  type="button"
-                  className="flex w-full items-center justify-between gap-2 text-left text-sm font-medium"
-                  onClick={() => setToolEventsExpanded((expanded) => !expanded)}
-                  aria-expanded={toolEventsExpanded}
+                );
+              }
+              return (
+                <div
+                  key={item.id}
+                  className={`flex ${
+                    item.messageType === 'user' ? 'justify-end' : 'justify-start'
+                  }`}
                 >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <Wrench className="h-4 w-4 shrink-0 text-primary" />
-                    <span className="truncate">
-                      工具调用过程（{toolEvents.length}）
-                    </span>
-                    {isGenerating && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />}
-                  </span>
-                  <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${toolEventsExpanded ? 'rotate-180' : ''}`} />
-                </button>
-                {toolEventsExpanded && (
-                  <div className="mt-3 max-h-52 space-y-2 overflow-y-auto border-t pt-3">
-                    {toolEvents.map((toolEvent, index) => (
-                      <div key={`${toolEvent.name}-${index}`} className="flex items-start gap-2 text-xs">
-                        {toolEvent.type === 'tool_executed'
-                          ? <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 text-green-600" />
-                          : <Loader2 className="mt-0.5 h-3.5 w-3.5 animate-spin text-primary" />}
-                        <div className="min-w-0">
-                          <div className="font-medium">{toolEvent.name}</div>
-                          {toolEvent.type === 'tool_executed' && toolEvent.result && (
-                            <pre className="mt-1 max-h-20 overflow-auto whitespace-pre-wrap text-muted-foreground">
-                              {toolEvent.result}
-                            </pre>
-                          )}
-                        </div>
+                  <div className="flex max-w-[80%] items-start gap-2">
+                    {item.messageType === 'ai' && (
+                      <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-full border bg-background">
+                        <img
+                          src={logoUrl}
+                          alt="NoCodeAI"
+                          className="h-full w-full object-cover"
+                        />
                       </div>
-                    ))}
+                    )}
+                    <div className="flex min-w-0 flex-col items-start gap-1">
+                    {item.messageType === 'ai' && thinkingMessageIds.has(item.id) && (
+                      <div className="flex items-center gap-1.5 px-1 text-xs text-muted-foreground">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        <span>正在思考</span>
+                      </div>
+                    )}
+                    <Card
+                      className={`p-3 ${
+                        item.messageType === 'user'
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-muted'
+                      }`}
+                    >
+                      <pre className="whitespace-pre-wrap text-sm font-sans">
+                        {item.message}
+                      </pre>
+                    </Card>
+                    </div>
                   </div>
-                )}
-              </Card>
-            )}
-            {chatHistory.map((item) => (
-              <div key={item.id} className={`flex ${item.messageType === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <Card className={`max-w-[80%] p-3 ${item.messageType === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted'}`}>
-                  <pre className="whitespace-pre-wrap text-sm font-sans">{item.message}</pre>
-                </Card>
-              </div>
-            ))}
-            {(description || descriptionStreaming) && (
-              <Card className="bg-muted p-4">
-                <div className="mb-2 text-xs font-medium text-muted-foreground">
-                  生成说明
                 </div>
-                <pre className="whitespace-pre-wrap text-sm font-sans">{description}</pre>
-                {descriptionStreaming && <span className="ml-1 animate-pulse">▍</span>}
-              </Card>
-            )}
+              );
+            })}
             <div ref={chatEndRef} />
           </div>
           <div className="border-t p-4">
-            <div className="flex gap-2">
+            <div className="flex items-center gap-2">
+              <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  checked={useGraph}
+                  disabled={isGenerating}
+                  onChange={(event) => setUseGraph(event.target.checked)}
+                />
+                代码生成
+              </label>
               <Input value={message} placeholder="输入消息..." disabled={isGenerating}
                 onChange={(event) => setMessage(event.target.value)}
                 onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void handleSendMessage(); } }} />
@@ -491,23 +1007,13 @@ export default function ChatPage() {
                   <div className="mb-2 px-2 text-xs font-medium text-muted-foreground">
                     生成文件
                   </div>
-                  {Object.keys(generatedFiles).map((fileName) => (
-                    <button
-                      key={fileName}
-                      type="button"
-                      className={`mb-1 w-full truncate rounded px-2 py-1.5 text-left text-sm ${
-                        selectedFile === fileName
-                          ? 'bg-primary text-primary-foreground'
-                          : 'hover:bg-muted'
-                      }`}
-                      onClick={() => {
-                        setSelectedFile(fileName);
-                        setGeneratedCode(generatedFiles[fileName]);
-                      }}
-                    >
-                      {fileName}
-                    </button>
-                  ))}
+                  <FileTree
+                    nodes={fileTree}
+                    selectedFile={selectedFile}
+                    expandedFolders={expandedFolders}
+                    onToggleFolder={handleToggleFolder}
+                    onSelectFile={handleSelectFile}
+                  />
                   {Object.keys(generatedFiles).length === 0 && (
                     <div className="px-2 text-xs text-muted-foreground">
                       暂无生成文件
@@ -551,7 +1057,7 @@ export default function ChatPage() {
                   className="h-full w-full border-0 bg-white"
                   title="Preview"
                   sandbox="allow-scripts"
-                  srcDoc={generatedFiles['index.html'] ?? ''}
+                  srcDoc={buildStaticPreview(generatedFiles)}
                 />
               )
             ) : (

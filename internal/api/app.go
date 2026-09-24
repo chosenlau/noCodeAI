@@ -77,16 +77,31 @@ type NoCodeAppAdminListRequest struct {
 }
 
 type AppVo struct {
-	ID           int64     `json:"id,string"`
-	AppName      string    `json:"appName"`
-	Cover        string    `json:"cover"`
-	InitPrompt   string    `json:"initPrompt"`
-	CodeGenType  string    `json:"codeGenType"`
-	DeployKey    string    `json:"deployKey"`
-	DeployedTime time.Time `json:"deployedTime"`
-	Priority     int32     `json:"priority"`
-	UserID       int64     `json:"userId,string"`
-	User         UserVo    `json:"user"`
-	CreateTime   time.Time `json:"createTime"`
-	UpdateTime   time.Time `json:"updateTime"`
+	ID               int64     `json:"id,string"`
+	AppName          string    `json:"appName"`
+	Cover            string    `json:"cover"`
+	InitPrompt       string    `json:"initPrompt"`
+	CodeGenType      string    `json:"codeGenType"`
+	DeployKey        string    `json:"deployKey"`
+	DeployedTime     time.Time `json:"deployedTime"`
+	Priority         int32     `json:"priority"`
+	UserID           int64     `json:"userId,string"`
+	User             UserVo    `json:"user"`
+	CreateTime       time.Time `json:"createTime"`
+	UpdateTime       time.Time `json:"updateTime"`
+	TokenUsage       int64     `json:"tokenUsage"`
+	PromptTokens     int64     `json:"promptTokens"`
+	CompletionTokens int64     `json:"completionTokens"`
+	Memory           MemoryVo  `json:"memory"`
+}
+
+type MemoryVo struct {
+	Summary          string    `json:"summary"`
+	Round            int64     `json:"round"`
+	PromptTokens     int64     `json:"promptTokens"`
+	CompletionTokens int64     `json:"completionTokens"`
+	TotalTokens      int64     `json:"totalTokens"`
+	Summarizing      bool      `json:"summarizing"`
+	SummaryError     string    `json:"summaryError"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }

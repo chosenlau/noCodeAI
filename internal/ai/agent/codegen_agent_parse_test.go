@@ -35,6 +35,11 @@ func TestParseCodeResponseVariants(t *testing.T) {
 			wantHTML: "<!doctype html><html lang=\"zh-CN\"><body>你好</body></html>",
 		},
 		{
+			name:     "raw html with explanatory prefix",
+			response: "Generated page:\n<!doctype html><html><body>ok</body></html>",
+			wantHTML: "<!doctype html><html><body>ok</body></html>",
+		},
+		{
 			name:     "multi file code fences",
 			response: "```html\n<div>页面</div>\n```\n```css\nbody { color: red; }\n```\n```javascript\nconsole.log('ok')\n```",
 			wantHTML: "<div>页面</div>",

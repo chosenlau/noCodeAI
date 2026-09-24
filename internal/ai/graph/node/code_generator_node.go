@@ -4,14 +4,13 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
+	"os"
 
 	"github.com/bytedance/gopkg/util/logger"
 	aimodel "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
 	"github.com/chosenlau/noCodeAI/internal/ai/graph/state"
 	"github.com/chosenlau/noCodeAI/internal/core"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
-	file "github.com/chosenlau/noCodeAI/pkg/myfile"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -31,11 +30,6 @@ func (n *CodeGeneratorNode) execute(ctx context.Context, input *state.GraphState
 	state.NotifyStepStart(input.WorkFlowContext, "代码生成")
 	appID := input.WorkFlowContext.AppID
 	msg := buildCodeGenMessages(input.WorkFlowContext)
-	savePath, err := file.GetCodeOutputRoot()
-	if err != nil {
-		logger.Errorf("获取保存路径失败: %v", err)
-		return nil, fmt.Errorf("获取保存路径失败: %w", err)
-	}
 	CodeGenType := input.WorkFlowContext.GenerationType
 
 	logger.Info(fmt.Sprintf("%s代码生成", enum.CodeGenTypeTextMap[CodeGenType]))
@@ -58,7 +52,13 @@ func (n *CodeGeneratorNode) execute(ctx context.Context, input *state.GraphState
 		}
 	}
 
-	generatedCodeDir := filepath.Join(savePath, fmt.Sprintf("%s_%d", CodeGenType, appID))
+	generatedCodeDir, err := n.CodeGenFacade.SavedCodeDir(CodeGenType, appID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve generated code directory: %w", err)
+	}
+	if _, err := os.Stat(generatedCodeDir); err != nil {
+		return nil, fmt.Errorf("generated code directory is missing: %w", err)
+	}
 	logger.Infof("AI 代码生成完成，生成目录: %s", generatedCodeDir)
 	input.WorkFlowContext.GenerateCodeDir = generatedCodeDir
 	state.NotifyStepCompleted(input.WorkFlowContext, "代码生成")

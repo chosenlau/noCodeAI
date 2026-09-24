@@ -1,6 +1,18 @@
-import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { FormEvent, useEffect, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import {
+  ArrowUp,
+  Code2,
+  LayoutTemplate,
+  LogOut,
+  MessageCircle,
+  Plus,
+  Settings,
+  Sparkles,
+  UserCircle,
+  WandSparkles,
+} from 'lucide-react';
 import { appApi, userApi } from '@/api';
 import { useAuthStore } from '@/store/auth';
 import { Button } from '@/components/ui/button';
@@ -23,187 +35,339 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { toast } from '@/hooks/use-toast';
 import { ApiError } from '@/lib/errors';
-import { LogOut, Plus } from 'lucide-react';
 import type { AppVo } from '@/types/api';
+import logo from '@/assets/NoCodeAI.svg';
+
+const assistantMessages = [
+  '你好，我可以把你的想法变成一个可以运行的网页。',
+  '试着描述一个页面、一个功能，或者一段用户流程。',
+  '例如：做一个有作品集、联系方式和暗色切换的个人主页。',
+];
+
+const projectTypeLabels: Record<string, string> = {
+  html: 'HTML 页面',
+  multi_file: '多文件项目',
+  vue_project: 'Vue 3 项目',
+};
 
 export default function AppsPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
-  const { user, logout: authLogout } = useAuthStore();
+  const { user, isAuthenticated, logout: authLogout } = useAuthStore();
+  const [prompt, setPrompt] = useState('');
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false);
   const [initPrompt, setInitPrompt] = useState('');
+  const [assistantMessage] = useState(
+    () =>
+      assistantMessages[
+        Math.floor(Math.random() * assistantMessages.length)
+      ]
+  );
+  const consumedPromptRef = useRef('');
+  const pendingPrompt = (
+    location.state as { pendingPrompt?: string } | null
+  )?.pendingPrompt;
 
-  const { data: myApps, isLoading, error, refetch } = useQuery({
+  const {
+    data: myApps,
+    isLoading,
+    error,
+    refetch,
+  } = useQuery({
     queryKey: ['myApps'],
-    queryFn: () =>
-      appApi.listMyApps(),
+    queryFn: appApi.listMyApps,
+    enabled: isAuthenticated,
     retry: false,
   });
-
-  useEffect(() => {
-    if (error && error instanceof ApiError && error.isNotLogin()) {
-      authLogout();
-      navigate('/login', { replace: true });
-      toast({
-        title: '登录已过期',
-        description: '请重新登录',
-        variant: 'destructive',
-      });
-    }
-  }, [error, authLogout, navigate]);
 
   const logoutMutation = useMutation({
     mutationFn: userApi.logout,
     onSuccess: () => {
       authLogout();
-      navigate('/login');
-      toast({
-        title: '已退出登录',
-      });
+      toast({ title: '已退出登录' });
     },
-    onError: (error: ApiError) => {
+    onError: (mutationError: ApiError) => {
       toast({
         variant: 'destructive',
         title: '退出失败',
-        description: error.message,
+        description: mutationError.message,
       });
     },
   });
 
   const createAppMutation = useMutation({
     mutationFn: appApi.create,
-    onSuccess: (appId: string) => {
+    onSuccess: (appId: string, createdPrompt: string) => {
       setIsCreateDialogOpen(false);
       setInitPrompt('');
-      queryClient.invalidateQueries({ queryKey: ['myApps'] });
-      toast({
-        title: '创建成功',
-        description: '应用已成功创建',
+      void queryClient.invalidateQueries({ queryKey: ['myApps'] });
+      navigate(`/chat/${appId}`, {
+        state: { initialPrompt: createdPrompt.trim() },
       });
-      navigate(`/chat/${appId}`);
     },
-    onError: (error: ApiError) => {
+    onError: (mutationError: ApiError) => {
       toast({
         variant: 'destructive',
         title: '创建失败',
-        description: error.message,
+        description: mutationError.message,
       });
     },
   });
 
-  const handleCreateApp = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!initPrompt.trim()) {
-      toast({
-        variant: 'destructive',
-        title: '提示不能为空',
-      });
+  useEffect(() => {
+    if (
+      !isAuthenticated ||
+      !pendingPrompt?.trim() ||
+      consumedPromptRef.current === pendingPrompt
+    ) {
       return;
     }
-    createAppMutation.mutate(initPrompt);
+
+    consumedPromptRef.current = pendingPrompt;
+    navigate('/', { replace: true, state: null });
+    createAppMutation.mutate(pendingPrompt.trim());
+  }, [createAppMutation, isAuthenticated, navigate, pendingPrompt]);
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!prompt.trim()) {
+      return;
+    }
+    if (!isAuthenticated) {
+      navigate('/login', { state: { pendingPrompt: prompt.trim() } });
+      return;
+    }
+    createAppMutation.mutate(prompt.trim());
+    setPrompt('');
+  };
+
+  const handleCreateApp = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!initPrompt.trim()) {
+      return;
+    }
+    createAppMutation.mutate(initPrompt.trim());
   };
 
   const handleCardClick = (app: AppVo) => {
     navigate(`/chat/${app.id}`);
   };
 
+  const apps = myApps?.records ?? [];
+
   return (
-    <div className="min-h-screen bg-background">
-      <header className="border-b">
-        <div className="container mx-auto px-4 py-4 flex items-center justify-between">
-          <h1 className="text-2xl font-semibold">我的应用</h1>
-          <div className="flex items-center gap-4">
-            <span className="text-sm text-muted-foreground">
-              {user?.userName}
-            </span>
-            <Button
-              variant="ghost"
-              size="icon"
+    <main className={`home-shell ${isAuthenticated ? 'home-shell-authenticated' : ''}`}>
+      <header className="home-header">
+        <button
+          type="button"
+          className="brand-lockup"
+          onClick={() => navigate('/')}
+          aria-label="返回首页"
+        >
+          <img src={logo} alt="NoCodeAI" className="brand-logo" />
+          <span>NoCodeAI</span>
+        </button>
+
+        <div className="header-actions">
+          <button type="button" className="icon-button" title="设置" aria-label="设置">
+            <Settings size={18} />
+          </button>
+          {isAuthenticated ? (
+            <button
+              type="button"
+              className="profile-chip"
+              title="个人中心"
+              aria-label="个人中心"
+            >
+              <UserCircle size={19} />
+              <span>{user?.userName || '我的账户'}</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="icon-button"
+              title="登录"
+              aria-label="登录"
+              onClick={() => navigate('/login')}
+            >
+              <UserCircle size={19} />
+            </button>
+          )}
+          {isAuthenticated && (
+            <button
+              type="button"
+              className="icon-button"
+              title="退出登录"
+              aria-label="退出登录"
               onClick={() => logoutMutation.mutate()}
             >
-              <LogOut className="h-5 w-5" />
-            </Button>
-          </div>
+              <LogOut size={17} />
+            </button>
+          )}
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-8">
-        <div className="mb-6">
-          <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
-            <DialogTrigger asChild>
-              <Button>
-                <Plus className="h-4 w-4 mr-2" />
-                创建应用
-              </Button>
-            </DialogTrigger>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>创建新应用</DialogTitle>
-                <DialogDescription>
-                  输入应用描述，AI 将为您生成代码
-                </DialogDescription>
-              </DialogHeader>
-              <form onSubmit={handleCreateApp} className="space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="initPrompt">应用描述</Label>
-                  <Input
-                    id="initPrompt"
-                    placeholder="例如：创建一个待办事项应用"
-                    value={initPrompt}
-                    onChange={(e) => setInitPrompt(e.target.value)}
-                  />
-                </div>
-                <Button
-                  type="submit"
-                  className="w-full"
-                  disabled={createAppMutation.isPending}
-                >
-                  {createAppMutation.isPending ? '创建中...' : '创建'}
-                </Button>
-              </form>
-            </DialogContent>
-          </Dialog>
+      <section className="home-content">
+        <div className="hero-copy">
+          <div className="eyebrow">
+            <Sparkles size={14} />
+            <span>从想法到可运行产品</span>
+          </div>
+          <h1>{isAuthenticated ? '继续构建你的下一个项目' : '需要我为你做些什么？'}</h1>
+          <p>
+            {isAuthenticated
+              ? '告诉我你想修改或创建什么，NoCodeAI 会陪你一步步完成。'
+              : '描述一个网页或产品想法，马上开始你的第一次生成。'}
+          </p>
         </div>
 
-        {isLoading ? (
-          <div className="text-center py-12 text-muted-foreground">
-            加载中...
-          </div>
-        ) : error && !(error instanceof ApiError && error.isNotLogin()) ? (
-          <div className="text-center py-12 space-y-4" role="alert">
-            <p className="text-destructive">应用列表加载失败：{error.message}</p>
-            <Button variant="outline" onClick={() => void refetch()}>
-              重新加载
-            </Button>
-          </div>
-        ) : myApps && myApps.records && myApps.records.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {myApps.records.map((app: AppVo) => (
-              <Card
-                key={app.id}
-                className="cursor-pointer hover:shadow-lg transition-shadow"
-                onClick={() => handleCardClick(app)}
-              >
-                <CardHeader>
-                  <CardTitle>{app.appName || '未命名应用'}</CardTitle>
-                  <CardDescription className="line-clamp-2">
-                    {app.initPrompt}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <div className="text-xs text-muted-foreground">
-                    创建于 {new Date(app.createTime).toLocaleDateString()}
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-12 text-muted-foreground">
-            暂无应用，点击上方按钮创建第一个应用
+        {!isAuthenticated && (
+          <div className="conversation-preview" aria-label="助手示例对话">
+            <div className="assistant-avatar">
+              <WandSparkles size={17} />
+            </div>
+            <div>
+              <span className="message-label">NoCodeAI 助手</span>
+              <p>{assistantMessage}</p>
+            </div>
           </div>
         )}
-      </main>
-    </div>
+
+        <form className="prompt-composer" onSubmit={handleSubmit}>
+          <div className="composer-icon">
+            <MessageCircle size={18} />
+          </div>
+          <Input
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            placeholder="描述你想创建的网页..."
+            aria-label="输入你的需求"
+            className="composer-input"
+          />
+          <Button
+            type="submit"
+            size="icon"
+            className="composer-submit"
+            disabled={!prompt.trim() || createAppMutation.isPending}
+            aria-label="发送需求"
+          >
+            <ArrowUp size={18} />
+          </Button>
+        </form>
+
+        {!isAuthenticated && (
+          <div className="suggestion-row">
+            {['个人作品集', '产品落地页', '数据看板'].map((suggestion) => (
+              <button
+                type="button"
+                key={suggestion}
+                className="suggestion-pill"
+                onClick={() => setPrompt(`创建一个${suggestion}`)}
+              >
+                <Plus size={14} />
+                {suggestion}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {isAuthenticated && (
+          <section className="projects-section">
+            <div className="section-heading">
+              <div>
+                <span className="section-kicker">WORKSPACE</span>
+                <h2>我的应用</h2>
+              </div>
+              <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
+                <DialogTrigger asChild>
+                  <Button variant="outline" className="new-project-button">
+                    <Plus size={16} />
+                    新建应用
+                  </Button>
+                </DialogTrigger>
+                <DialogContent>
+                  <DialogHeader>
+                    <DialogTitle>创建新应用</DialogTitle>
+                    <DialogDescription>
+                      描述你的应用，AI 会为你生成初始项目。
+                    </DialogDescription>
+                  </DialogHeader>
+                  <form onSubmit={handleCreateApp} className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="initPrompt">应用描述</Label>
+                      <Input
+                        id="initPrompt"
+                        placeholder="例如：创建一个极简的产品介绍页"
+                        value={initPrompt}
+                        onChange={(event) => setInitPrompt(event.target.value)}
+                      />
+                    </div>
+                    <Button
+                      type="submit"
+                      className="w-full"
+                      disabled={createAppMutation.isPending}
+                    >
+                      {createAppMutation.isPending ? '创建中...' : '开始创建'}
+                    </Button>
+                  </form>
+                </DialogContent>
+              </Dialog>
+            </div>
+
+            {isLoading ? (
+              <div className="projects-placeholder">正在加载你的应用...</div>
+            ) : error ? (
+              <div className="projects-placeholder projects-error">
+                <span>应用列表加载失败</span>
+                <Button variant="outline" size="sm" onClick={() => void refetch()}>
+                  重试
+                </Button>
+              </div>
+            ) : apps.length > 0 ? (
+              <div className="projects-scroller">
+                {apps.map((app) => (
+                  <Card
+                    key={app.id}
+                    className="project-card"
+                    onClick={() => handleCardClick(app)}
+                  >
+                    <CardHeader>
+                      <div className="project-card-icon">
+                        {app.codeGenType === 'vue_project' ? (
+                          <Code2 size={19} />
+                        ) : (
+                          <LayoutTemplate size={19} />
+                        )}
+                      </div>
+                      <CardTitle>{app.appName || '未命名应用'}</CardTitle>
+                      <CardDescription>{app.initPrompt}</CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <span className="project-type">
+                        {projectTypeLabels[app.codeGenType] || '网页项目'}
+                      </span>
+                      <span className="project-date">
+                        {new Date(app.createTime).toLocaleDateString()}
+                      </span>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-projects">
+                <div className="empty-projects-icon">
+                  <LayoutTemplate size={21} />
+                </div>
+                <div>
+                  <strong>还没有应用</strong>
+                  <p>从上方输入框开始创建你的第一个项目。</p>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+      </section>
+    </main>
   );
 }

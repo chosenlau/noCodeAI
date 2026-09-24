@@ -2,13 +2,16 @@ package logic
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/bytedance/gopkg/util/logger"
+	"github.com/chosenlau/noCodeAI/internal/ai/agent"
 	graphnode "github.com/chosenlau/noCodeAI/internal/ai/graph/node"
 	"github.com/chosenlau/noCodeAI/internal/ai/graph/state"
 	"github.com/chosenlau/noCodeAI/internal/ai/graph/workflow"
@@ -33,32 +36,11 @@ type AppService struct {
 	chatHistoryService service.IChatHistoryService
 	memoryStore        store.MemoryStore
 	simpleWorkflow     *workflow.SimpleWorkflow
+	chatAgent          *agent.ChatAgent
 	loadApp            func(context.Context, int64) (*model.App, error)
 	updateArchitecture func(context.Context, int64, string) error
 	updateCodeGenType  func(context.Context, int64, string) error
 	db                 *gorm.DB // 数据库连接
-}
-
-func (s *AppService) GetSourceCode(ctx context.Context, appId int64, generationType string, loginUser *api.UserVo) (map[string]string, error) {
-	if appId <= 0 || loginUser == nil || generationType == "" {
-		return nil, errorutil.ParamsError
-	}
-	app, err := s.loadAppRecord(ctx, appId)
-	if err != nil {
-		return nil, err
-	}
-	if app.UserID != loginUser.ID {
-		return nil, errorutil.NotAuthError
-	}
-	if enum.CodeGenTypeTextMap[enum.CodeGenTypeEnum(generationType)] == "" {
-		return nil, errorutil.ParamsError.WithMessage("unsupported code generation type")
-	}
-	root, err := file.GetCodeOutputRoot()
-	if err != nil {
-		return nil, err
-	}
-	files, _, err := graphnode.ReadCodeFiles(filepath.Join(root, generationType+"_"+strconv.FormatInt(appId, 10)))
-	return files, err
 }
 
 func NewAppService(
@@ -68,6 +50,7 @@ func NewAppService(
 	db *gorm.DB,
 	memoryStore store.MemoryStore,
 	simpleWorkflow *workflow.SimpleWorkflow,
+	chatAgent *agent.ChatAgent,
 ) *AppService {
 	return &AppService{
 		aiCodeGenFacade:    aiCodeGenFacade,
@@ -76,6 +59,7 @@ func NewAppService(
 		db:                 db,
 		memoryStore:        memoryStore,
 		simpleWorkflow:     simpleWorkflow,
+		chatAgent:          chatAgent,
 		loadApp: func(ctx context.Context, appID int64) (*model.App, error) {
 			q := query.Use(db)
 			return q.App.WithContext(ctx).
@@ -97,6 +81,181 @@ func NewAppService(
 			return err
 		},
 	}
+}
+func (s *AppService) GetSourceCode(ctx context.Context, appId int64, generationType string, loginUser *api.UserVo) (map[string]string, error) {
+	if appId <= 0 || loginUser == nil {
+		return nil, errorutil.ParamsError
+	}
+	app, err := s.loadAppRecord(ctx, appId)
+	if err != nil {
+		return nil, err
+	}
+	if app.UserID != loginUser.ID {
+		return nil, errorutil.NotAuthError
+	}
+	summarizing, err := s.chatHistoryService.IsSummarizing(ctx, appId)
+	if err != nil {
+		return nil, errorutil.SystemError.WithMessage("failed to check conversation summary status")
+	}
+	if summarizing {
+		return nil, errorutil.ParamsError.WithMessage("conversation summary is in progress")
+	}
+	storedGenerationType := enum.CodeGenTypeEnum(app.CodeGenType)
+	requestedGenerationType := enum.CodeGenTypeEnum(generationType)
+	if storedGenerationType != "" && enum.CodeGenTypeTextMap[storedGenerationType] == "" {
+		storedGenerationType = ""
+	}
+	if requestedGenerationType != "" && enum.CodeGenTypeTextMap[requestedGenerationType] == "" {
+		requestedGenerationType = ""
+	}
+
+	projectRoot, err := file.GetProjectRoot()
+	if err != nil {
+		return nil, err
+	}
+	outputRoot, err := file.GetCodeOutputRoot()
+	if err != nil {
+		return nil, err
+	}
+
+	roots := []string{outputRoot}
+	legacyRoot := filepath.Join(projectRoot, "saves")
+	if legacyRoot != outputRoot {
+		roots = append(roots, legacyRoot)
+	}
+
+	directory, err := findSourceCodeDirectory(
+		roots,
+		appId,
+		storedGenerationType,
+		requestedGenerationType,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	files, _, err := graphnode.ReadCodeFiles(directory)
+	return files, err
+}
+
+func findSourceCodeDirectory(
+	roots []string,
+	appID int64,
+	storedGenerationType enum.CodeGenTypeEnum,
+	requestedGenerationType enum.CodeGenTypeEnum,
+) (string, error) {
+	if appID <= 0 {
+		return "", fmt.Errorf("invalid app ID: %d", appID)
+	}
+
+	types := make([]enum.CodeGenTypeEnum, 0, len(enum.CodeGenTypeTextMap))
+	addType := func(codeGenType enum.CodeGenTypeEnum) {
+		if codeGenType == "" || enum.CodeGenTypeTextMap[codeGenType] == "" {
+			return
+		}
+		for _, existing := range types {
+			if existing == codeGenType {
+				return
+			}
+		}
+		types = append(types, codeGenType)
+	}
+	addType(storedGenerationType)
+	addType(requestedGenerationType)
+	addType(enum.HtmlCodeGen)
+	addType(enum.MultiFileGen)
+	addType(enum.VueCodeGen)
+
+	for _, root := range roots {
+		for _, codeGenType := range types {
+			directory := filepath.Join(root, fmt.Sprintf("%s_%d", codeGenType, appID))
+			info, err := os.Stat(directory)
+			if err == nil && info.IsDir() {
+				return directory, nil
+			}
+		}
+	}
+
+	return "", fmt.Errorf("generated source code not found for app %d", appID)
+}
+
+func (s *AppService) ChatWithAgent(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], error) {
+	logger.Infof("[ChatAgent] request started: appID=%d, userID=%d", appId, func() int64 {
+		if loginUser == nil {
+			return 0
+		}
+		return loginUser.ID
+	}())
+	if strings.TrimSpace(message) == "" || appId <= 0 || loginUser == nil {
+		return nil, errorutil.ParamsError.WithMessage("invalid chat request")
+	}
+	if s.chatAgent == nil || s.chatHistoryService == nil || s.memoryStore == nil {
+		return nil, errorutil.SystemError.WithMessage("chat service dependencies are not initialized")
+	}
+	app, err := s.loadAppRecord(ctx, appId)
+	if err != nil {
+		return nil, err
+	}
+	if app.UserID != loginUser.ID {
+		return nil, errorutil.NotAuthError
+	}
+	if err := s.chatHistoryService.AddChatMessage(ctx, appId, message, enum.UserMessageType, loginUser.ID); err != nil {
+		logger.Errorf("[ChatAgent] save user history failed: %v", err)
+		return nil, errorutil.SystemError.WithMessage("failed to save chat history")
+	}
+	if err := s.memoryStore.AddUserMessage(ctx, message, strconv.FormatInt(appId, 10)); err != nil {
+		logger.Errorf("[ChatAgent] save user memory failed: %v", err)
+		return nil, errorutil.SystemError.WithMessage("failed to save user message to memory")
+	}
+	history, err := s.chatHistoryService.EnsureMemoryLoaded(ctx, appId, 20)
+	if err != nil {
+		logger.Errorf("[ChatAgent] load memory failed: %v", err)
+		return nil, err
+	}
+	stream, err := s.chatAgent.Chat(
+		s.withTokenUsageRecorder(ctx, appId),
+		history,
+	)
+	if err != nil {
+		logger.Errorf("[ChatAgent] create agent stream failed: %v", err)
+		return nil, err
+	}
+	logger.Infof("[ChatAgent] stream created: appID=%d, history=%d", appId, len(history))
+	return s.persistChatAgentStream(ctx, stream, appId, loginUser.ID), nil
+}
+
+func (s *AppService) persistChatAgentStream(ctx context.Context, source *schema.StreamReader[*schema.Message], appID, userID int64) *schema.StreamReader[*schema.Message] {
+	reader, writer := schema.Pipe[*schema.Message](2)
+	go func() {
+		defer source.Close()
+		defer writer.Close()
+		var content strings.Builder
+		for {
+			msg, err := source.Recv()
+			if err == io.EOF {
+				text := strings.TrimSpace(content.String())
+				if text != "" {
+					_ = s.chatHistoryService.AddChatMessage(ctx, appID, text, enum.AIMessageType, userID)
+					if err := s.memoryStore.AddAssistantMessage(ctx, text, strconv.FormatInt(appID, 10)); err != nil {
+						logger.Errorf("save assistant message to memory failed: %v", err)
+					}
+					s.chatHistoryService.MaybeGenerateSummary(ctx, appID, userID)
+				}
+				return
+			}
+			if err != nil {
+				_ = writer.Send(nil, err)
+				return
+			}
+			if msg != nil {
+				content.WriteString(msg.Content)
+				if writer.Send(msg, nil) {
+					return
+				}
+			}
+		}
+	}()
+	return reader
 }
 
 func (s *AppService) AddApp(ctx context.Context, req *api.NoCodeAppAddRequest, userId int64) (int64, error) {
@@ -231,19 +390,23 @@ func (s *AppService) GetAppVo(ctx context.Context, id int64, userId int64) (api.
 
 	// 3. 构建应用 VO
 	appVo := api.AppVo{
-		ID:           app.ID,
-		AppName:      app.AppName,
-		Cover:        app.Cover,
-		InitPrompt:   app.InitPrompt,
-		CodeGenType:  app.CodeGenType,
-		DeployKey:    app.DeployKey,
-		DeployedTime: app.DeployedTime,
-		Priority:     app.Priority,
-		UserID:       app.UserID,
-		User:         *userVo,
-		CreateTime:   app.CreateTime,
-		UpdateTime:   app.UpdateTime,
+		ID:               app.ID,
+		AppName:          app.AppName,
+		Cover:            app.Cover,
+		InitPrompt:       app.InitPrompt,
+		CodeGenType:      app.CodeGenType,
+		DeployKey:        app.DeployKey,
+		DeployedTime:     app.DeployedTime,
+		Priority:         app.Priority,
+		UserID:           app.UserID,
+		User:             *userVo,
+		CreateTime:       app.CreateTime,
+		UpdateTime:       app.UpdateTime,
+		TokenUsage:       app.TokenUsage,
+		PromptTokens:     app.PromptTokens,
+		CompletionTokens: app.CompletionTokens,
 	}
+	s.enrichAppMemory(ctx, &appVo, app.TokenUsage)
 	return appVo, nil
 }
 
@@ -369,19 +532,23 @@ func (s *AppService) GetAppVoList(ctx context.Context, appList []*model.App) ([]
 	var appVoList []api.AppVo
 	for _, app := range appList {
 		appVo := api.AppVo{
-			ID:           app.ID,
-			AppName:      app.AppName,
-			Cover:        app.Cover,
-			InitPrompt:   app.InitPrompt,
-			CodeGenType:  app.CodeGenType,
-			DeployKey:    app.DeployKey,
-			DeployedTime: app.DeployedTime,
-			Priority:     app.Priority,
-			UserID:       app.UserID,
-			User:         userVoMap[app.UserID],
-			CreateTime:   app.CreateTime,
-			UpdateTime:   app.UpdateTime,
+			ID:               app.ID,
+			AppName:          app.AppName,
+			Cover:            app.Cover,
+			InitPrompt:       app.InitPrompt,
+			CodeGenType:      app.CodeGenType,
+			DeployKey:        app.DeployKey,
+			DeployedTime:     app.DeployedTime,
+			Priority:         app.Priority,
+			UserID:           app.UserID,
+			User:             userVoMap[app.UserID],
+			CreateTime:       app.CreateTime,
+			UpdateTime:       app.UpdateTime,
+			TokenUsage:       app.TokenUsage,
+			PromptTokens:     app.PromptTokens,
+			CompletionTokens: app.CompletionTokens,
 		}
+		s.enrichAppMemory(ctx, &appVo, app.TokenUsage)
 		appVoList = append(appVoList, appVo)
 	}
 
@@ -546,20 +713,63 @@ func (s *AppService) AdminGetAppVo(ctx context.Context, id int64) (api.AppVo, er
 
 	// 3. 构建应用 VO
 	appVo := api.AppVo{
-		ID:           app.ID,
-		AppName:      app.AppName,
-		Cover:        app.Cover,
-		InitPrompt:   app.InitPrompt,
-		CodeGenType:  app.CodeGenType,
-		DeployKey:    app.DeployKey,
-		DeployedTime: app.DeployedTime,
-		Priority:     app.Priority,
-		UserID:       app.UserID,
-		User:         *userVo,
-		CreateTime:   app.CreateTime,
-		UpdateTime:   app.UpdateTime,
+		ID:               app.ID,
+		AppName:          app.AppName,
+		Cover:            app.Cover,
+		InitPrompt:       app.InitPrompt,
+		CodeGenType:      app.CodeGenType,
+		DeployKey:        app.DeployKey,
+		DeployedTime:     app.DeployedTime,
+		Priority:         app.Priority,
+		UserID:           app.UserID,
+		User:             *userVo,
+		CreateTime:       app.CreateTime,
+		UpdateTime:       app.UpdateTime,
+		TokenUsage:       app.TokenUsage,
+		PromptTokens:     app.PromptTokens,
+		CompletionTokens: app.CompletionTokens,
 	}
+	s.enrichAppMemory(ctx, &appVo, app.TokenUsage)
 	return appVo, nil
+}
+
+func (s *AppService) enrichAppMemory(ctx context.Context, appVo *api.AppVo, databaseTokenUsage int64) {
+	if appVo == nil {
+		return
+	}
+	appVo.Memory.PromptTokens = appVo.PromptTokens
+	appVo.Memory.CompletionTokens = appVo.CompletionTokens
+	appVo.Memory.TotalTokens = databaseTokenUsage
+	if s.memoryStore == nil {
+		appVo.TokenUsage = databaseTokenUsage
+		return
+	}
+	metadata, err := s.memoryStore.GetMetadata(ctx, strconv.FormatInt(appVo.ID, 10))
+	if err != nil {
+		logger.Warnf("load app memory metadata failed: %v", err)
+		appVo.TokenUsage = databaseTokenUsage
+		return
+	}
+	appVo.Memory = api.MemoryVo{
+		Summary:          metadata.Summary,
+		Round:            metadata.Round,
+		PromptTokens:     metadata.PromptTokens,
+		CompletionTokens: metadata.CompletionTokens,
+		TotalTokens:      metadata.TotalTokens,
+		Summarizing:      metadata.Summarizing,
+		SummaryError:     metadata.SummaryError,
+		UpdatedAt:        metadata.UpdatedAt,
+	}
+	if appVo.Memory.TotalTokens == 0 {
+		appVo.Memory.TotalTokens = databaseTokenUsage
+	}
+	if appVo.Memory.PromptTokens == 0 {
+		appVo.Memory.PromptTokens = appVo.PromptTokens
+	}
+	if appVo.Memory.CompletionTokens == 0 {
+		appVo.Memory.CompletionTokens = appVo.CompletionTokens
+	}
+	appVo.TokenUsage = appVo.Memory.TotalTokens
 }
 
 func (s *AppService) AdminListApp(ctx context.Context, req *api.NoCodeAppAdminListRequest) (*response.PageResponse[*model.App], error) {
@@ -688,6 +898,9 @@ func (s *AppService) ChatToGenCode(ctx context.Context, appId int64, message str
 }
 
 func (s *AppService) GraphToGenCode(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], *state.WorkFlowContext, error) {
+	if s.chatHistoryService == nil || s.memoryStore == nil || s.simpleWorkflow == nil {
+		return nil, nil, errorutil.SystemError.WithMessage("graph service dependencies are not initialized")
+	}
 	if message == "" {
 		return nil, nil, errorutil.ParamsError.WithMessage("消息不能为空")
 	}
@@ -712,6 +925,13 @@ func (s *AppService) GraphToGenCode(ctx context.Context, appId int64, message st
 	if app.CodeGenType != "" && enum.CodeGenTypeTextMap[enum.CodeGenTypeEnum(app.CodeGenType)] == "" {
 		return nil, nil, errorutil.ParamsError.WithMessage("应用代码生成类型不支持")
 	}
+	summarizing, err := s.chatHistoryService.IsSummarizing(ctx, appId)
+	if err != nil {
+		return nil, nil, errorutil.SystemError.WithMessage("failed to check conversation summary status")
+	}
+	if summarizing {
+		return nil, nil, errorutil.ParamsError.WithMessage("conversation summary is in progress")
+	}
 
 	var unlock func()
 	if locker, ok := s.memoryStore.(store.DistributedLocker); ok {
@@ -727,32 +947,22 @@ func (s *AppService) GraphToGenCode(ctx context.Context, appId int64, message st
 		}
 		return nil, nil, errorutil.SystemError.WithMessage("failed to save chat history")
 	}
+	if err := s.memoryStore.AddUserMessage(ctx, message, strconv.FormatInt(appId, 10)); err != nil {
+		if unlock != nil {
+			unlock()
+		}
+		return nil, nil, errorutil.SystemError.WithMessage("failed to save user message to memory")
+	}
 
-	memoryID := strconv.FormatInt(appId, 10)
-	history, err := s.memoryStore.GetMessages(ctx, memoryID)
+	history, err := s.chatHistoryService.EnsureMemoryLoaded(ctx, appId, 20)
 	if err != nil {
 		if unlock != nil {
 			unlock()
 		}
 		return nil, nil, errorutil.SystemError.WithMessage("failed to load workflow memory")
 	}
-	if len(history) == 0 {
-		if _, err := s.chatHistoryService.LoadChatHistoryToMemory(ctx, appId, s.memoryStore, 20); err != nil {
-			if unlock != nil {
-				unlock()
-			}
-			return nil, nil, errorutil.SystemError.WithMessage("failed to load chat history")
-		}
-		history, err = s.memoryStore.GetMessages(ctx, memoryID)
-		if err != nil {
-			if unlock != nil {
-				unlock()
-			}
-			return nil, nil, errorutil.SystemError.WithMessage("failed to reload workflow memory")
-		}
-	}
 	projectArchitecture := app.ProjectArchitecture
-	originalPrompt := buildWorkflowPrompt(history, projectArchitecture, message)
+	originalPrompt := buildWorkflowPrompt(history, projectArchitecture, "")
 
 	workflowContext := &state.WorkFlowContext{
 		AppID:          appId,
@@ -761,7 +971,10 @@ func (s *AppService) GraphToGenCode(ctx context.Context, appId int64, message st
 		MaxRetries:     3,
 	}
 
-	stream, err := s.simpleWorkflow.ExecuteStream(ctx, workflowContext)
+	stream, err := s.simpleWorkflow.ExecuteStream(
+		s.withTokenUsageRecorder(ctx, appId),
+		workflowContext,
+	)
 	if err != nil {
 		if unlock != nil {
 			unlock()
@@ -798,13 +1011,14 @@ func (s *AppService) persistWorkflowContextStream(
 					}
 				}
 				s.saveWorkflowDescription(ctx, workflowContext, appID, userID)
+				s.chatHistoryService.MaybeGenerateSummary(ctx, appID, userID)
 				return
 			}
 			if err != nil {
 				_ = writer.Send(nil, err)
 				return
 			}
-			if !writer.Send(message, nil) {
+			if writer.Send(message, nil) {
 				return
 			}
 		}
@@ -874,4 +1088,12 @@ func buildWorkflowPrompt(history []*schema.Message, architecture, message string
 	builder.WriteString("\n## 本次用户需求\n")
 	builder.WriteString(message)
 	return builder.String()
+}
+
+// 让ctx带上recorder，baseagent取recorder，recorder的记录逻辑在service层
+func (s *AppService) withTokenUsageRecorder(ctx context.Context, appID int64) context.Context {
+	return agent.WithTokenUsageRecorder(ctx, &appTokenUsageRecorder{
+		service: s,
+		appID:   appID,
+	})
 }

@@ -17,6 +17,9 @@ type App struct {
 	Cover               string    `gorm:"column:cover;comment:应用封面" json:"cover"`                                              // 应用封面
 	InitPrompt          string    `gorm:"column:initPrompt;comment:应用初始化的 prompt" json:"initPrompt"`                           // 应用初始化的 prompt
 	ProjectArchitecture string    `gorm:"column:projectArchitecture;comment:项目架构" json:"projectArchitecture"`                  // 项目架构
+	PromptTokens        int64     `gorm:"column:promptTokens;not null;comment:提示词 Token 消耗量" json:"promptTokens"`              // 提示词 Token 消耗量
+	CompletionTokens    int64     `gorm:"column:completionTokens;not null;comment:生成内容 Token 消耗量" json:"completionTokens"`     // 生成内容 Token 消耗量
+	TokenUsage          int64     `gorm:"column:tokenUsage;not null;comment:Token 消耗总量" json:"tokenUsage"`                     // Token 消耗总量
 	CodeGenType         string    `gorm:"column:codeGenType;comment:代码生成类型（枚举）" json:"codeGenType"`                            // 代码生成类型（枚举）
 	DeployKey           string    `gorm:"column:deployKey;comment:部署标识" json:"deployKey"`                                      // 部署标识
 	DeployedTime        time.Time `gorm:"column:deployedTime;comment:部署时间" json:"deployedTime"`                                // 部署时间

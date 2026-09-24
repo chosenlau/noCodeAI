@@ -44,16 +44,26 @@ func TestBuildWorkflowPromptFake(t *testing.T) {
 type fakeMemoryStore struct {
 	mu       sync.Mutex
 	messages map[string][]*schema.Message
+	summary  map[string]string
+	metadata map[string]*store.MemoryMetadata
 }
 
 func newFakeMemoryStore() *fakeMemoryStore {
-	return &fakeMemoryStore{messages: make(map[string][]*schema.Message)}
+	return &fakeMemoryStore{
+		messages: make(map[string][]*schema.Message),
+		summary:  make(map[string]string),
+		metadata: make(map[string]*store.MemoryMetadata),
+	}
 }
 
 func (s *fakeMemoryStore) GetMessages(_ context.Context, memoryID string) ([]*schema.Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]*schema.Message(nil), s.messages[memoryID]...), nil
+	messages := append([]*schema.Message(nil), s.messages[memoryID]...)
+	if s.summary[memoryID] != "" {
+		return append([]*schema.Message{schema.SystemMessage(s.summary[memoryID])}, messages...), nil
+	}
+	return messages, nil
 }
 
 func (s *fakeMemoryStore) AppendMessage(_ context.Context, message *schema.Message, memoryID string) error {
@@ -67,6 +77,77 @@ func (s *fakeMemoryStore) ClearMessages(_ context.Context, memoryID string) erro
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.messages, memoryID)
+	return nil
+}
+
+func (s *fakeMemoryStore) GetSummary(_ context.Context, memoryID string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.summary[memoryID], nil
+}
+
+func (s *fakeMemoryStore) SetSummary(_ context.Context, memoryID string, summary string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if summary == "" {
+		delete(s.summary, memoryID)
+		return nil
+	}
+	s.summary[memoryID] = summary
+	return nil
+}
+
+func (s *fakeMemoryStore) GetRecentMessages(_ context.Context, memoryID string) ([]*schema.Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*schema.Message(nil), s.messages[memoryID]...), nil
+}
+
+func (s *fakeMemoryStore) ClearMemory(_ context.Context, memoryID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.messages, memoryID)
+	delete(s.summary, memoryID)
+	delete(s.metadata, memoryID)
+	return nil
+}
+
+func (s *fakeMemoryStore) GetMetadata(_ context.Context, memoryID string) (*store.MemoryMetadata, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	metadata := s.metadata[memoryID]
+	if metadata == nil {
+		metadata = &store.MemoryMetadata{Summary: s.summary[memoryID]}
+	}
+	copy := *metadata
+	return &copy, nil
+}
+
+func (s *fakeMemoryStore) SetMetadata(_ context.Context, memoryID string, metadata *store.MemoryMetadata) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if metadata == nil {
+		delete(s.metadata, memoryID)
+		delete(s.summary, memoryID)
+		return nil
+	}
+	copy := *metadata
+	s.metadata[memoryID] = &copy
+	s.summary[memoryID] = metadata.Summary
+	return nil
+}
+
+func (s *fakeMemoryStore) AddTokenUsage(_ context.Context, memoryID string, promptTokens, completionTokens int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	metadata := s.metadata[memoryID]
+	if metadata == nil {
+		metadata = &store.MemoryMetadata{}
+		s.metadata[memoryID] = metadata
+	}
+	metadata.PromptTokens += promptTokens
+	metadata.CompletionTokens += completionTokens
+	metadata.TotalTokens += promptTokens + completionTokens
 	return nil
 }
 
@@ -120,7 +201,7 @@ func TestGraphToGenCodeRealLLM(t *testing.T) {
 	)
 
 	chatHistory := &fakeChatHistoryService{}
-	appService := NewAppService(facade, nil, chatHistory, nil, memoryStore, graph)
+	appService := NewAppService(facade, nil, chatHistory, nil, memoryStore, graph, nil)
 	appService.loadApp = func(context.Context, int64) (*model.App, error) {
 		return &model.App{
 			ID: appID, UserID: userID, CodeGenType: string(enum.HtmlCodeGen),
@@ -191,4 +272,17 @@ func (s *fakeChatHistoryService) ListAllChatHistoryByPageForAdmin(context.Contex
 
 func (s *fakeChatHistoryService) LoadChatHistoryToMemory(context.Context, int64, store.MemoryStore, int) (int, error) {
 	return 0, nil
+}
+
+func (s *fakeChatHistoryService) EnsureMemoryLoaded(context.Context, int64, int) ([]*schema.Message, error) {
+	return []*schema.Message{
+		schema.UserMessage("previous request"),
+		schema.AssistantMessage("previous answer", nil),
+	}, nil
+}
+
+func (s *fakeChatHistoryService) MaybeGenerateSummary(context.Context, int64, int64) {}
+
+func (s *fakeChatHistoryService) IsSummarizing(context.Context, int64) (bool, error) {
+	return false, nil
 }

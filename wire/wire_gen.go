@@ -40,7 +40,8 @@ func InitializeApp() (*server.Hertz, error) {
 		return nil, err
 	}
 	memoryStore := store.NewRedisMemoryStore(client, 20, 24*time.Hour)
-	chatHistoryService := logic.NewChatHistoryService(db, memoryStore)
+	chatSummaryAgent := agent.NewChatSummaryAgent(chatModelWrapperAdaptor, nil, nil)
+	chatHistoryService := logic.NewChatHistoryService(db, memoryStore, chatSummaryAgent)
 	toolManager, err := aitools.NewToolManager()
 	if err != nil {
 		return nil, err
@@ -48,6 +49,7 @@ func InitializeApp() (*server.Hertz, error) {
 	htmlCodeGenAgent := agent.NewHtmlCodeGenAgent(chatModelWrapperAdaptor, nil, nil, nil)
 	multiFileCodeGenAgent := agent.NewMultiFileCodeGenAgent(chatModelWrapperAdaptor, nil, nil, nil)
 	vueCodeGenAgent := agent.NewVueCodeGenAgent(chatModelWrapperAdaptor, nil, nil, toolManager, nil)
+	chatAgent := agent.NewChatAgent(chatModelWrapperAdaptor, nil, nil)
 	codeGenAgentFactory := agent.NewCodeGenAgentFactory(
 		htmlCodeGenAgent,
 		multiFileCodeGenAgent,
@@ -66,7 +68,7 @@ func InitializeApp() (*server.Hertz, error) {
 		node.NewCodeGeneratorNode(noCodeAIGenFacade),
 		node.NewCodeQualityCheckNode(qualityAgent),
 	)
-	appService := logic.NewAppService(noCodeAIGenFacade, userService, chatHistoryService, db, memoryStore, simpleWorkflow)
+	appService := logic.NewAppService(noCodeAIGenFacade, userService, chatHistoryService, db, memoryStore, simpleWorkflow, chatAgent)
 	appHandler := handler.NewAppHandler(appService, userService, chatHistoryService)
 	chatHistoryHandler := handler.NewChatHistoryHandler(chatHistoryService, userService)
 	hertz := initServer(configConfig, userHandler, appHandler, chatHistoryHandler, userService)

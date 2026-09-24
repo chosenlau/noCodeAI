@@ -149,6 +149,9 @@ func (a *BaseAgent) Generate(ctx context.Context, messages []*schema.Message, ad
 				"total", float64(tokenUsage.PromptTokens+tokenUsage.CompletionTokens))
 		}
 	}
+	if resultMsg != nil && resultMsg.ResponseMeta != nil {
+		recordTokenUsage(ctx, resultMsg.ResponseMeta.Usage)
+	}
 
 	return resultMsg, nil
 }
@@ -237,10 +240,19 @@ func (a *BaseAgent) GenerateStream(ctx context.Context, messages []*schema.Messa
 							if msg.ResponseMeta != nil && msg.ResponseMeta.Usage != nil {
 								lastTokenUsage = msg.ResponseMeta.Usage
 							}
-							if !writer.Send(msg, nil) {
+							if writer.Send(msg, nil) {
 								return
 							}
 						}
+					}
+				} else if event.Output.MessageOutput.Message != nil {
+					msg := event.Output.MessageOutput.Message
+					fullContent += msg.Content
+					if msg.ResponseMeta != nil && msg.ResponseMeta.Usage != nil {
+						lastTokenUsage = msg.ResponseMeta.Usage
+					}
+					if writer.Send(msg, nil) {
+						return
 					}
 				}
 			}
@@ -263,7 +275,28 @@ func (a *BaseAgent) GenerateStream(ctx context.Context, messages []*schema.Messa
 				}
 			}
 		}
+		recordTokenUsage(ctx, lastTokenUsage)
 	}()
 
 	return reader, nil
+}
+
+// 传token逻辑，开始执行时绑定
+type TokenUsageRecorder interface {
+	RecordTokenUsage(ctx context.Context, usage *schema.TokenUsage)
+}
+
+type tokenUsageRecorderContextKey struct{}
+
+func WithTokenUsageRecorder(ctx context.Context, recorder TokenUsageRecorder) context.Context {
+	return context.WithValue(ctx, tokenUsageRecorderContextKey{}, recorder)
+}
+
+func recordTokenUsage(ctx context.Context, usage *schema.TokenUsage) {
+	if usage == nil {
+		return
+	}
+	if recorder, ok := ctx.Value(tokenUsageRecorderContextKey{}).(TokenUsageRecorder); ok && recorder != nil {
+		recorder.RecordTokenUsage(ctx, usage)
+	}
 }

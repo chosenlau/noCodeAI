@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/chosenlau/noCodeAI/internal/handler"
@@ -54,6 +55,7 @@ func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandle
 		appRoute.GET("/my/list/page/vo", middleware.AuthMiddleware(userService), appHandler.ListMyApp)
 		// appRoute.GET("/chat", middleware.AuthMiddleware(userService), appHandler.ChatToGenCode)
 		appRoute.POST("/graph", middleware.AuthMiddleware(userService), appHandler.GraphToGenCode)
+		appRoute.POST("/chat", middleware.AuthMiddleware(userService), appHandler.ChatWithAgent)
 		appRoute.POST("/add", middleware.AuthMiddleware(userService), appHandler.AddApp)
 		appRoute.POST("/update", middleware.AuthMiddleware(userService), appHandler.UpdateApp)
 		appRoute.POST("/delete", middleware.AuthMiddleware(userService), appHandler.DeleteApp)
@@ -77,6 +79,13 @@ func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandle
 
 func CustomRecoveryHandler(ctx context.Context, c *app.RequestContext, err interface{}, stack []byte) {
 	hlog.Errorf("panic recovered:%v\n%s", err, stack)
-	c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.SystemError))
+	stackText := string(stack)
+	if len(stackText) > 4000 {
+		stackText = stackText[:4000]
+	}
+	recoveryError := errorutil.SystemError.WithMessage(
+		fmt.Sprintf("internal panic: %v\n%s", err, stackText),
+	)
+	c.JSON(consts.StatusOK, response.NewErrorResponse[any](recoveryError))
 	c.Abort()
 }

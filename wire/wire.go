@@ -110,6 +110,7 @@ func InitializeApp() (*server.Hertz, error) {
 		agent.NewHtmlCodeGenAgent,
 		agent.NewMultiFileCodeGenAgent,
 		agent.NewVueCodeGenAgent,
+		agent.NewChatSummaryAgent,
 		agent.NewCodeGenAgentFactory,
 		ProvideSimpleWorkflow,
 		ProvideMemoryStore,

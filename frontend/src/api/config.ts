@@ -1,5 +1,10 @@
-import axios, { AxiosError, AxiosResponse, InternalAxiosRequestConfig } from 'axios';
+import axios, {
+  AxiosError,
+  AxiosResponse,
+  InternalAxiosRequestConfig,
+} from 'axios';
 import { ApiError } from '@/lib/errors';
+import { useAuthStore } from '@/store/auth';
 import type { BaseResponse } from '@/types/api';
 
 const api = axios.create({
@@ -11,35 +16,46 @@ const api = axios.create({
   },
 });
 
-// 请求拦截器
-api.interceptors.request.use(
-  (config: InternalAxiosRequestConfig) => {
-    return config;
-  },
-  (error) => {
-    return Promise.reject(error);
+function handleAuthExpired() {
+  useAuthStore.getState().logout();
+  if (window.location.pathname !== '/') {
+    window.location.replace('/');
   }
+}
+
+api.interceptors.request.use(
+  (config: InternalAxiosRequestConfig) => config,
+  (error) => Promise.reject(error),
 );
 
-// 响应拦截器 - 自动解包 BaseResponse
 api.interceptors.response.use(
   (response: AxiosResponse<BaseResponse>) => {
     const { code, message, data } = response.data;
 
     if (code === 0) {
-      // 直接返回 data，axios 会将其包装为 Promise
       return Promise.resolve(data) as any;
     }
 
-    throw new ApiError(code, message);
+    const apiError = new ApiError(code, message);
+    if (apiError.isNotLogin()) {
+      handleAuthExpired();
+    }
+    throw apiError;
   },
   (error: AxiosError<BaseResponse>) => {
     if (error.response) {
       const { code, message } = error.response.data;
-      throw new ApiError(code || 50000, message || '网络请求失败');
+      const apiError = new ApiError(
+        code || (error.response.status === 401 ? 40100 : 50000),
+        message || '网络请求失败',
+      );
+      if (apiError.isNotLogin()) {
+        handleAuthExpired();
+      }
+      throw apiError;
     }
     throw new ApiError(50000, '网络连接失败');
-  }
+  },
 );
 
 export default api;

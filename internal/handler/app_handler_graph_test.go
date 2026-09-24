@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	aimodel "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
 	"github.com/chosenlau/noCodeAI/internal/ai/graph/state"
 	"github.com/chosenlau/noCodeAI/internal/api"
 	"github.com/chosenlau/noCodeAI/internal/service"
@@ -14,6 +15,7 @@ import (
 	"github.com/cloudwego/eino/schema"
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/common/test/mock"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,6 +30,7 @@ func (s *fakeGraphAppService) GetSourceCode(context.Context, int64, string, *api
 func (s *fakeGraphAppService) GraphToGenCode(context.Context, int64, string, *api.UserVo) (*schema.StreamReader[*schema.Message], *state.WorkFlowContext, error) {
 	reader, writer := schema.Pipe[*schema.Message](2)
 	workflowContext := &state.WorkFlowContext{
+		QualityResult: aimodel.QualityResult{IsValid: true},
 		CodeContent: map[string]string{
 			"src/App.vue": "<template>fake</template>",
 			"src/main.js": "console.log('fake')",
@@ -35,20 +38,21 @@ func (s *fakeGraphAppService) GraphToGenCode(context.Context, int64, string, *ap
 	}
 	go func() {
 		defer writer.Close()
-		_ = writer.Send(&schema.Message{Content: `{"stepNumber":1,"currentStep":"代码生成"}`}, nil)
-		_ = writer.Send(&schema.Message{Content: `{"stepNumber":2,"currentStep":"代码质量检查"}`}, nil)
+		_ = writer.Send(&schema.Message{Content: `{"stepNumber":1,"currentStep":"code generation"}`}, nil)
+		_ = writer.Send(&schema.Message{Content: `{"stepNumber":2,"currentStep":"quality check"}`}, nil)
 	}()
 	return reader, workflowContext, nil
 }
 
 func TestAppHandlerGraphToGenCodeFake(t *testing.T) {
-	handler := NewAppHandler(
-		&fakeGraphAppService{},
-		nil,
-		nil,
-	)
+	handler := NewAppHandler(&fakeGraphAppService{}, nil, nil)
 	ctx := app.NewContext(4)
-	ctx.Request.SetRequestURI("/app/graph?appId=1&message=创建首页")
+	ctx.Request.SetRequestURI("/app/graph")
+	ctx.Request.Header.SetMethod(consts.MethodPost)
+	ctx.Request.Header.SetContentTypeBytes([]byte("application/json"))
+	requestBody := `{"appId":"1","message":"create homepage"}`
+	ctx.Request.SetBodyString(requestBody)
+	ctx.Request.Header.SetContentLength(len(requestBody))
 	ctx.Response.SetBodyString("")
 	conn := mock.NewConn("")
 	ctx.SetConn(conn)
@@ -59,8 +63,8 @@ func TestAppHandlerGraphToGenCodeFake(t *testing.T) {
 	bodyBytes, _ := conn.WriterRecorder().Peek(conn.WriterRecorder().WroteLen())
 	body := string(bodyBytes)
 	require.Contains(t, body, "event: step_completed")
-	require.Contains(t, body, "代码生成")
-	require.Contains(t, body, "代码质量检查")
+	require.Contains(t, body, "code generation")
+	require.Contains(t, body, "quality check")
 	require.Contains(t, body, "event: code_completed")
 	require.Contains(t, body, `"src/App.vue":"\u003ctemplate\u003efake\u003c/template\u003e"`)
 	require.Contains(t, body, "event: done")

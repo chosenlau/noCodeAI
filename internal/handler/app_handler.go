@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/chosenlau/noCodeAI/internal/api"
@@ -296,11 +297,17 @@ func (a *AppHandler) GraphToGenCode(ctx context.Context, c *app.RequestContext) 
 		err   error
 	}, 5)
 	streamDone := make(chan struct{})
+	var closeStreamOnce sync.Once
+	closeStream := func() {
+		closeStreamOnce.Do(func() {
+			stream.Close()
+		})
+	}
 
 	go func() {
 		select {
 		case <-ctx.Done():
-			stream.Close()
+			closeStream()
 		case <-streamDone:
 		}
 	}()
@@ -308,7 +315,7 @@ func (a *AppHandler) GraphToGenCode(ctx context.Context, c *app.RequestContext) 
 	go func() {
 		defer close(streamDone)
 		defer close(sseChan)
-		defer stream.Close()
+		defer closeStream()
 
 		for {
 			chunk, err := stream.Recv()
@@ -348,7 +355,24 @@ func (a *AppHandler) GraphToGenCode(ctx context.Context, c *app.RequestContext) 
 			}
 			// 直接判断 res.err 是否为 io.EOF
 			if res.err == io.EOF {
-				data, marshalErr := json.Marshal(workflowContext.CodeContent)
+				if !workflowContext.QualityResult.IsValid {
+					errorMessage := workflowContext.Description
+					if errorMessage == "" && len(workflowContext.QualityResult.Errors) > 0 {
+						errorMessage = workflowContext.QualityResult.Errors[0]
+					}
+					if errorMessage == "" {
+						errorMessage = "code quality check failed"
+					}
+					_ = w.WriteEvent(lastEventID, "error", []byte(errorMessage))
+					_ = w.WriteEvent(lastEventID, "done", []byte{1})
+					c.Flush()
+					return
+				}
+				codeContent := workflowContext.CodeContent
+				if codeContent == nil {
+					codeContent = map[string]string{}
+				}
+				data, marshalErr := json.Marshal(codeContent)
 				if marshalErr != nil {
 					_ = w.WriteEvent(lastEventID, "error", []byte(marshalErr.Error()))
 				} else {
@@ -400,6 +424,50 @@ func (a *AppHandler) GraphToGenCode(ctx context.Context, c *app.RequestContext) 
 				_ = w.WriteEvent(lastEventID, eventName, []byte(res.chunk.Content))
 				c.Flush()
 			}
+		}
+	}
+}
+
+func (a *AppHandler) ChatWithAgent(ctx context.Context, c *app.RequestContext) {
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+
+	var req api.NoCodeGenCodeRequest
+	if err := c.BindAndValidate(&req); err != nil {
+		sendSseErrorAndExit(c, err.Error())
+		return
+	}
+	value, exists := c.Get(constants.UserVoKey)
+	if !exists {
+		sendSseErrorAndExit(c, "user is not logged in")
+		return
+	}
+	stream, err := a.appService.ChatWithAgent(ctx, req.AppId, req.Message, value.(*api.UserVo))
+	if err != nil {
+		sendSseErrorAndExit(c, err.Error())
+		return
+	}
+	defer stream.Close()
+
+	writer := sse.NewWriter(c)
+	lastEventID := sse.GetLastEventID(&c.Request)
+	for {
+		message, err := stream.Recv()
+		if err == io.EOF {
+			_ = writer.WriteEvent(lastEventID, "done", []byte("1"))
+			c.Flush()
+			return
+		}
+		if err != nil {
+			_ = writer.WriteEvent(lastEventID, "error", []byte(err.Error()))
+			_ = writer.WriteEvent(lastEventID, "done", []byte("1"))
+			c.Flush()
+			return
+		}
+		if message != nil && message.Content != "" {
+			_ = writer.WriteEvent(lastEventID, "message", []byte(message.Content))
+			c.Flush()
 		}
 	}
 }

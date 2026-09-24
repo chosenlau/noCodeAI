@@ -35,3 +35,6 @@ tests
 resume
 
 tmp
+
+.gocache
+**/.gocache/

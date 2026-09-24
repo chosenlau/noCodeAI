@@ -27,6 +27,13 @@ func (s *CodeSaver) GetDirPath(codeType enum.CodeGenTypeEnum, appId int64) (stri
 	return s.buildDir(codeType, appId)
 }
 
+func (s *CodeSaver) SavedDirPath(codeType enum.CodeGenTypeEnum, appId int64) (string, error) {
+	if appId <= 0 {
+		return "", fmt.Errorf("invalid app ID: %d", appId)
+	}
+	return filepath.Join(s.baseDir, fmt.Sprintf("%s_%d", codeType, appId)), nil
+}
+
 // SaveHtml 保存单文件 (HTML)
 func (s *CodeSaver) SaveHtml(appId int64, response *aimodel.HtmlCodeResponse) (string, error) {
 	// 1. 强类型输入，直接校验

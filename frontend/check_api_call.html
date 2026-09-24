@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>API Debug</title>
+</head>
+<body>
+  <h1>Testing /app/my/list/page/vo API</h1>
+  <pre id="output"></pre>
+  
+  <script>
+    const output = document.getElementById('output');
+    
+    // [DEBUG-wsc] Check if this API call is failing and causing white screen
+    fetch('http://localhost:5177/app/my/list/page/vo', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ pageNum: 1, pageSize: 100 })
+    })
+    .then(res => res.json())
+    .then(data => {
+      output.textContent = 'Response:\n' + JSON.stringify(data, null, 2);
+      console.log('API Response:', data);
+      if (data.code === 40100) {
+        console.error('[DEBUG-wsc] AUTH ERROR: User not logged in - this would cause AppsPage to fail');
+      }
+    })
+    .catch(err => {
+      output.textContent = 'Error: ' + err.message;
+      console.error('[DEBUG-wsc] API call failed:', err);
+    });
+  </script>
+</body>
+</html>

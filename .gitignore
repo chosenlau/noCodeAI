@@ -1,0 +1,40 @@
+config/config-local.yml
+mysql-cluster
+sql
+
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Local environment files
+.env
+.env.*
+frontend/.env
+frontend/.env.*
+
+# Logs and runtime output
+*.log
+frontend/*.log
+
+# Generated/local artifacts
+saves/
+dist/
+build/
+coverage/
+
+# Local agent/tooling state
+.agents/
+skills-lock.json
+
+scripts
+docs
+.agents
+
+test
+tests
+resume
+
+tmp
+
+.gocache
+**/.gocache/

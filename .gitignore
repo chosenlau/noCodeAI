@@ -1,6 +1,8 @@
 config/config-local.yml
 mysql-cluster
 sql
+!migrations/
+!migrations/**
 
 # Dependencies
 node_modules/
@@ -27,11 +29,19 @@ coverage/
 skills-lock.json
 
 scripts
-docs
+docs/*
+!docs/plans/
+!docs/plans/**
+!docs/interview/
+!docs/interview/**
 .agents
 
 test
 tests
+!test/
+!test/**
+!internal/ai/agent/test/
+!internal/ai/agent/test/**
 resume
 
 tmp

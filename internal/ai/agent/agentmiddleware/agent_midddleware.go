@@ -143,7 +143,7 @@ func (m *innerModel) wrapOutputStream(inner *schema.StreamReader[*schema.Message
 
 	go func() {
 		defer writer.Close()
-		var buffer string
+		defer inner.Close()
 		for {
 			msg, err := inner.Recv()
 			if err != nil {
@@ -152,14 +152,14 @@ func (m *innerModel) wrapOutputStream(inner *schema.StreamReader[*schema.Message
 				}
 				return
 			}
-			buffer += msg.Content
+			if msg == nil {
+				continue
+			}
 			normalizeEmptyExitToolArguments(msg)
-			if buffer != "" {
-				// if containsSensitiveContent(buffer) {
-				// 	writer.Send(nil, errors.New("检测到敏感信息，输出已中断"))
-				// 	return
-				// }
-				writer.Send(msg, nil)
+			// Tool calls and token usage can arrive without text content.
+			// Preserve them, and propagate downstream closure to the provider.
+			if writer.Send(msg, nil) {
+				return
 			}
 		}
 	}()

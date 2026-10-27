@@ -4,6 +4,7 @@
 package wire
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/chosenlau/noCodeAI/config"
@@ -16,7 +17,9 @@ import (
 	"github.com/chosenlau/noCodeAI/internal/core"
 	"github.com/chosenlau/noCodeAI/internal/core/saver"
 	"github.com/chosenlau/noCodeAI/internal/core/store"
+	"github.com/chosenlau/noCodeAI/internal/core/task"
 	"github.com/chosenlau/noCodeAI/internal/dal"
+	"github.com/chosenlau/noCodeAI/internal/dal/taskstore"
 	"github.com/chosenlau/noCodeAI/internal/handler"
 	"github.com/chosenlau/noCodeAI/internal/logic"
 	"github.com/chosenlau/noCodeAI/internal/router"
@@ -24,6 +27,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/google/wire"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 	"time"
 )
 
@@ -60,6 +64,35 @@ func ProvideToolManager() (*aitools.ToolManager, error) {
 	return aitools.NewToolManager()
 }
 
+// Preserve the existing agent configuration (no checkpoint or middleware yet).
+func ProvideHTMLAgent(model agent.ChatModelWrapperAdaptor) *agent.HtmlCodeGenAgent {
+	return agent.NewHtmlCodeGenAgent(model, nil, nil, nil)
+}
+func ProvideMultiFileAgent(model agent.ChatModelWrapperAdaptor) *agent.MultiFileCodeGenAgent {
+	return agent.NewMultiFileCodeGenAgent(model, nil, nil, nil)
+}
+func ProvideVueAgent(model agent.ChatModelWrapperAdaptor, tools *aitools.ToolManager) *agent.VueCodeGenAgent {
+	return agent.NewVueCodeGenAgent(model, nil, nil, tools, nil)
+}
+func ProvideSummaryAgent(model agent.ChatModelWrapperAdaptor) *agent.ChatSummaryAgent {
+	return agent.NewChatSummaryAgent(model, nil, nil)
+}
+func ProvideChatAgent(model agent.ChatModelWrapperAdaptor) *agent.ChatAgent {
+	return agent.NewChatAgent(model, nil, nil)
+}
+
+func ProvideTaskOptions(cfg *config.Config) task.Options {
+	return task.Options{
+		Enabled: cfg.Features.DetachedGraphTask, WorkerCount: cfg.Task.WorkerCount,
+		PollInterval: cfg.Task.PollInterval, ShutdownTimeout: cfg.Task.ShutdownTimeout,
+		OutboxBatchSize: cfg.Task.OutboxBatchSize,
+	}
+}
+
+func ProvideTaskManager(db *gorm.DB, options task.Options) *task.Manager {
+	return task.NewManager(taskstore.NewGormStore(db), options)
+}
+
 var configSet = wire.NewSet(
 	config.InitConfig,
 )
@@ -86,13 +119,25 @@ var llmSet = wire.NewSet(
 	ProvideChatModel,
 )
 
-func initServer(cfg *config.Config, userHandler *handler.UserHandler, appHandler *handler.AppHandler, chatHistoryHandler *handler.ChatHistoryHandler, userService service.IUserService) *server.Hertz {
+func initServer(cfg *config.Config, userHandler *handler.UserHandler, appHandler *handler.AppHandler, chatHistoryHandler *handler.ChatHistoryHandler, userService service.IUserService, redisClient *redis.Client, taskManager *task.Manager) *server.Hertz {
 
 	h := server.Default(
 		server.WithHostPorts(fmt.Sprintf(":%d", cfg.Server.Port)),
 		server.WithBasePath(cfg.Server.ContextPath),
 	)
-	router.RegisterRoutes(h, userHandler, appHandler, chatHistoryHandler, userService)
+	router.RegisterRoutes(h, userHandler, appHandler, chatHistoryHandler, userService, redisClient)
+	if err := taskManager.StartWorkers(); err != nil {
+		panic(err)
+	}
+	h.OnShutdown = append(h.OnShutdown, func(ctx context.Context) {
+		timeout := cfg.Task.ShutdownTimeout
+		if timeout <= 0 {
+			timeout = 20 * time.Second
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		_ = taskManager.Shutdown(shutdownCtx)
+	})
 	return h
 }
 
@@ -107,13 +152,16 @@ func InitializeApp() (*server.Hertz, error) {
 
 		core.NewNoCodeAIGenFacade,
 		saver.NewCodeSaver,
-		agent.NewHtmlCodeGenAgent,
-		agent.NewMultiFileCodeGenAgent,
-		agent.NewVueCodeGenAgent,
-		agent.NewChatSummaryAgent,
+		ProvideHTMLAgent,
+		ProvideMultiFileAgent,
+		ProvideVueAgent,
+		ProvideSummaryAgent,
+		ProvideChatAgent,
 		agent.NewCodeGenAgentFactory,
 		ProvideSimpleWorkflow,
 		ProvideMemoryStore,
 		ProvideToolManager,
+		ProvideTaskOptions,
+		ProvideTaskManager,
 	))
 }

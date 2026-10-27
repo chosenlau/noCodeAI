@@ -17,9 +17,12 @@ import (
 	"github.com/chosenlau/noCodeAI/internal/ai/graph/workflow"
 	"github.com/chosenlau/noCodeAI/internal/api"
 	"github.com/chosenlau/noCodeAI/internal/core"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
 	"github.com/chosenlau/noCodeAI/internal/core/store"
+	"github.com/chosenlau/noCodeAI/internal/core/task"
 	"github.com/chosenlau/noCodeAI/internal/dal/model"
 	"github.com/chosenlau/noCodeAI/internal/dal/query"
+	"github.com/chosenlau/noCodeAI/internal/dal/taskstore"
 	"github.com/chosenlau/noCodeAI/internal/service"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/chosenlau/noCodeAI/pkg/errorutil"
@@ -37,6 +40,7 @@ type AppService struct {
 	memoryStore        store.MemoryStore
 	simpleWorkflow     *workflow.SimpleWorkflow
 	chatAgent          *agent.ChatAgent
+	taskManager        *task.Manager
 	loadApp            func(context.Context, int64) (*model.App, error)
 	updateArchitecture func(context.Context, int64, string) error
 	updateCodeGenType  func(context.Context, int64, string) error
@@ -51,8 +55,9 @@ func NewAppService(
 	memoryStore store.MemoryStore,
 	simpleWorkflow *workflow.SimpleWorkflow,
 	chatAgent *agent.ChatAgent,
+	taskManager *task.Manager,
 ) *AppService {
-	return &AppService{
+	service := &AppService{
 		aiCodeGenFacade:    aiCodeGenFacade,
 		userService:        userService,
 		chatHistoryService: chatHistoryService,
@@ -60,6 +65,7 @@ func NewAppService(
 		memoryStore:        memoryStore,
 		simpleWorkflow:     simpleWorkflow,
 		chatAgent:          chatAgent,
+		taskManager:        taskManager,
 		loadApp: func(ctx context.Context, appID int64) (*model.App, error) {
 			q := query.Use(db)
 			return q.App.WithContext(ctx).
@@ -81,6 +87,10 @@ func NewAppService(
 			return err
 		},
 	}
+	if taskManager != nil {
+		taskManager.Register(task.KindGraph, service.executeGraphRun)
+	}
+	return service
 }
 func (s *AppService) GetSourceCode(ctx context.Context, appId int64, generationType string, loginUser *api.UserVo) (map[string]string, error) {
 	if appId <= 0 || loginUser == nil {
@@ -92,13 +102,6 @@ func (s *AppService) GetSourceCode(ctx context.Context, appId int64, generationT
 	}
 	if app.UserID != loginUser.ID {
 		return nil, errorutil.NotAuthError
-	}
-	summarizing, err := s.chatHistoryService.IsSummarizing(ctx, appId)
-	if err != nil {
-		return nil, errorutil.SystemError.WithMessage("failed to check conversation summary status")
-	}
-	if summarizing {
-		return nil, errorutil.ParamsError.WithMessage("conversation summary is in progress")
 	}
 	storedGenerationType := enum.CodeGenTypeEnum(app.CodeGenType)
 	requestedGenerationType := enum.CodeGenTypeEnum(generationType)
@@ -124,6 +127,16 @@ func (s *AppService) GetSourceCode(ctx context.Context, appId int64, generationT
 		roots = append(roots, legacyRoot)
 	}
 
+	if s.db != nil {
+		version, err := taskstore.NewExecutionStore(s.db).Current(ctx, appId)
+		if err != nil {
+			return nil, err
+		}
+		if version.Path != "" {
+			files, _, err := graphnode.ReadCodeFiles(version.Path)
+			return files, err
+		}
+	}
 	directory, err := findSourceCodeDirectory(
 		roots,
 		appId,
@@ -173,13 +186,19 @@ func findSourceCodeDirectory(
 			if err == nil && info.IsDir() {
 				return directory, nil
 			}
+			if err != nil && !os.IsNotExist(err) {
+				return "", fmt.Errorf("inspect project source: %w", err)
+			}
+			if err == nil {
+				return "", fmt.Errorf("project source is not a directory: %s", directory)
+			}
 		}
 	}
 
-	return "", fmt.Errorf("generated source code not found for app %d", appID)
+	return "", fmt.Errorf("generated source code not found for app %d: %w", appID, os.ErrNotExist)
 }
 
-func (s *AppService) ChatWithAgent(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], error) {
+func (s *AppService) chatWithAgent(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], error) {
 	logger.Infof("[ChatAgent] request started: appID=%d, userID=%d", appId, func() int64 {
 		if loginUser == nil {
 			return 0
@@ -207,7 +226,7 @@ func (s *AppService) ChatWithAgent(ctx context.Context, appId int64, message str
 		logger.Errorf("[ChatAgent] save user memory failed: %v", err)
 		return nil, errorutil.SystemError.WithMessage("failed to save user message to memory")
 	}
-	history, err := s.chatHistoryService.EnsureMemoryLoaded(ctx, appId, 20)
+	history, err := s.chatHistoryService.EnsureMemoryLoaded(s.withTokenUsageRecorder(ctx, appId), appId, 20)
 	if err != nil {
 		logger.Errorf("[ChatAgent] load memory failed: %v", err)
 		return nil, err
@@ -239,7 +258,6 @@ func (s *AppService) persistChatAgentStream(ctx context.Context, source *schema.
 					if err := s.memoryStore.AddAssistantMessage(ctx, text, strconv.FormatInt(appID, 10)); err != nil {
 						logger.Errorf("save assistant message to memory failed: %v", err)
 					}
-					s.chatHistoryService.MaybeGenerateSummary(ctx, appID, userID)
 				}
 				return
 			}
@@ -248,7 +266,9 @@ func (s *AppService) persistChatAgentStream(ctx context.Context, source *schema.
 				return
 			}
 			if msg != nil {
-				content.WriteString(msg.Content)
+				if contextmgr.EventKind(msg) == "" {
+					content.WriteString(msg.Content)
+				}
 				if writer.Send(msg, nil) {
 					return
 				}
@@ -858,7 +878,7 @@ func (s *AppService) AdminListApp(ctx context.Context, req *api.NoCodeAppAdminLi
 	return pageResponse, nil
 }
 
-func (s *AppService) ChatToGenCode(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], error) {
+func (s *AppService) chatToGenCode(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], error) {
 	// 1. 校验参数
 	if message == "" {
 		return nil, errorutil.ParamsError.WithMessage("消息不能为空")
@@ -889,6 +909,9 @@ func (s *AppService) ChatToGenCode(ctx context.Context, appId int64, message str
 		return nil, errorutil.SystemError.WithMessage("failed to save chat history")
 	}
 	// 5. 调用代码生成服务
+	if scope, _ := ctx.Value(executionScopeKey{}).(*executionScope); scope != nil && scope.mode == state.ModeModify {
+		return s.aiCodeGenFacade.ModifyCodeStream(ctx, appId, []*schema.Message{schema.UserMessage(fmt.Sprintf("本项目代码类型：%s，保留该技术栈。\n%s", scope.generationType, message))})
+	}
 	return s.aiCodeGenFacade.GenCodeStreamAndSave(
 		ctx,
 		appId,
@@ -897,7 +920,7 @@ func (s *AppService) ChatToGenCode(ctx context.Context, appId int64, message str
 	)
 }
 
-func (s *AppService) GraphToGenCode(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], *state.WorkFlowContext, error) {
+func (s *AppService) graphToGenCode(ctx context.Context, appId int64, message string, loginUser *api.UserVo) (*schema.StreamReader[*schema.Message], *state.WorkFlowContext, error) {
 	if s.chatHistoryService == nil || s.memoryStore == nil || s.simpleWorkflow == nil {
 		return nil, nil, errorutil.SystemError.WithMessage("graph service dependencies are not initialized")
 	}
@@ -925,40 +948,16 @@ func (s *AppService) GraphToGenCode(ctx context.Context, appId int64, message st
 	if app.CodeGenType != "" && enum.CodeGenTypeTextMap[enum.CodeGenTypeEnum(app.CodeGenType)] == "" {
 		return nil, nil, errorutil.ParamsError.WithMessage("应用代码生成类型不支持")
 	}
-	summarizing, err := s.chatHistoryService.IsSummarizing(ctx, appId)
-	if err != nil {
-		return nil, nil, errorutil.SystemError.WithMessage("failed to check conversation summary status")
-	}
-	if summarizing {
-		return nil, nil, errorutil.ParamsError.WithMessage("conversation summary is in progress")
-	}
-
-	var unlock func()
-	if locker, ok := s.memoryStore.(store.DistributedLocker); ok {
-		unlock, err = locker.Lock(ctx, strconv.FormatInt(appId, 10))
-		if err != nil {
-			return nil, nil, errorutil.SystemError.WithMessage("failed to acquire application generation lock")
-		}
-	}
 
 	if err := s.chatHistoryService.AddChatMessage(ctx, appId, message, enum.UserMessageType, loginUser.ID); err != nil {
-		if unlock != nil {
-			unlock()
-		}
 		return nil, nil, errorutil.SystemError.WithMessage("failed to save chat history")
 	}
 	if err := s.memoryStore.AddUserMessage(ctx, message, strconv.FormatInt(appId, 10)); err != nil {
-		if unlock != nil {
-			unlock()
-		}
 		return nil, nil, errorutil.SystemError.WithMessage("failed to save user message to memory")
 	}
 
-	history, err := s.chatHistoryService.EnsureMemoryLoaded(ctx, appId, 20)
+	history, err := s.chatHistoryService.EnsureMemoryLoaded(s.withTokenUsageRecorder(ctx, appId), appId, 20)
 	if err != nil {
-		if unlock != nil {
-			unlock()
-		}
 		return nil, nil, errorutil.SystemError.WithMessage("failed to load workflow memory")
 	}
 	projectArchitecture := app.ProjectArchitecture
@@ -970,60 +969,33 @@ func (s *AppService) GraphToGenCode(ctx context.Context, appId int64, message st
 		GenerationType: enum.CodeGenTypeEnum(app.CodeGenType),
 		MaxRetries:     3,
 	}
+	workflowContext.Plan.Goal = message
+	if scope, _ := ctx.Value(executionScopeKey{}).(*executionScope); scope != nil {
+		workflowContext.ExecutionMode = scope.mode
+		if scope.mode == state.ModeModify {
+			workflowContext.GenerationType = scope.generationType
+		}
+	}
 
 	stream, err := s.simpleWorkflow.ExecuteStream(
 		s.withTokenUsageRecorder(ctx, appId),
 		workflowContext,
 	)
 	if err != nil {
-		if unlock != nil {
-			unlock()
-		}
 		return nil, nil, err
 	}
-	return s.persistWorkflowContextStream(ctx, stream, workflowContext, appId, loginUser.ID, unlock), workflowContext, nil
+	return stream, workflowContext, nil
 }
 
-func (s *AppService) persistWorkflowContextStream(
-	ctx context.Context,
-	source *schema.StreamReader[*schema.Message],
-	workflowContext *state.WorkFlowContext,
-	appID int64,
-	userID int64,
-	unlock func(),
-) *schema.StreamReader[*schema.Message] {
-	reader, writer := schema.Pipe[*schema.Message](2)
-	go func() {
-		defer source.Close()
-		defer writer.Close()
-		if unlock != nil {
-			defer unlock()
+// Source publication is authoritative. These existing metadata projections are
+// best effort and happen only after the source transaction has committed.
+func (s *AppService) savePublishedWorkflow(ctx context.Context, wc *state.WorkFlowContext, appID, userID int64) {
+	if wc.GenerationType != "" && s.updateCodeGenType != nil {
+		if err := s.updateCodeGenType(ctx, appID, string(wc.GenerationType)); err != nil {
+			logger.Errorf("update published generation type: %v", err)
 		}
-		for {
-			message, err := source.Recv()
-			if err == io.EOF {
-				if ctx.Err() != nil {
-					return
-				}
-				if workflowContext.GenerationType != "" && s.updateCodeGenType != nil {
-					if err := s.updateCodeGenType(ctx, appID, string(workflowContext.GenerationType)); err != nil {
-						logger.Errorf("更新代码生成类型失败: %v", err)
-					}
-				}
-				s.saveWorkflowDescription(ctx, workflowContext, appID, userID)
-				s.chatHistoryService.MaybeGenerateSummary(ctx, appID, userID)
-				return
-			}
-			if err != nil {
-				_ = writer.Send(nil, err)
-				return
-			}
-			if writer.Send(message, nil) {
-				return
-			}
-		}
-	}()
-	return reader
+	}
+	s.saveWorkflowDescription(ctx, wc, appID, userID)
 }
 
 func (s *AppService) saveWorkflowDescription(ctx context.Context, workflowContext *state.WorkFlowContext, appID, userID int64) {

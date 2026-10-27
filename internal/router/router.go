@@ -16,9 +16,10 @@ import (
 	"github.com/cloudwego/hertz/pkg/common/hlog"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/hertz-contrib/cors"
+	"github.com/redis/go-redis/v9"
 )
 
-func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandler *handler.AppHandler, chatHistoryHandler *handler.ChatHistoryHandler, userService service.IUserService) {
+func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandler *handler.AppHandler, chatHistoryHandler *handler.ChatHistoryHandler, userService service.IUserService, redisClient *redis.Client) {
 	h.Use(cors.New(cors.Config{
 		AllowOrigins:     []string{"http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
@@ -50,12 +51,45 @@ func RegisterRoutes(h *server.Hertz, userHandler *handler.UserHandler, appHandle
 		appRoute.POST("/good/list/page/vo", appHandler.ListGoodApp)
 		appRoute.GET("/get/vo", middleware.AuthMiddleware(userService), appHandler.GetAppVo)
 		appRoute.GET("/:appId/source", middleware.AuthMiddleware(userService), appHandler.GetSourceCode)
+		appRoute.GET("/:appId/versions", middleware.AuthMiddleware(userService), appHandler.ListSourceVersions)
+		appRoute.POST("/:appId/versions/restore", middleware.AuthMiddleware(userService), appHandler.RestoreSourceVersion)
 
 		// 用户接口（需要登录）
 		appRoute.GET("/my/list/page/vo", middleware.AuthMiddleware(userService), appHandler.ListMyApp)
+		appRoute.POST("/graph/runs",
+			middleware.AuthMiddleware(userService),
+			middleware.RateLimitMiddleware(redisClient, middleware.RateLimitConfig{
+				Key: "app-graph-run", Rate: 3, Interval: time.Minute,
+				LimitType: middleware.RateLimitTypeUser,
+				Message:   "code generation requests are too frequent",
+			}),
+			appHandler.StartGraphRun,
+		)
+		appRoute.GET("/graph/runs/active", middleware.AuthMiddleware(userService), appHandler.GetActiveGraphRun)
+		appRoute.GET("/graph/runs/:runID", middleware.AuthMiddleware(userService), appHandler.GetGraphRun)
+		appRoute.POST("/graph/runs/:runID/control", middleware.AuthMiddleware(userService), appHandler.ControlGraphRun)
+		appRoute.GET("/graph/runs/:runID/events", middleware.AuthMiddleware(userService), appHandler.SubscribeGraphRun)
 		// appRoute.GET("/chat", middleware.AuthMiddleware(userService), appHandler.ChatToGenCode)
-		appRoute.POST("/graph", middleware.AuthMiddleware(userService), appHandler.GraphToGenCode)
-		appRoute.POST("/chat", middleware.AuthMiddleware(userService), appHandler.ChatWithAgent)
+		appRoute.POST("/graph",
+			middleware.AuthMiddleware(userService),
+			middleware.RateLimitMiddleware(redisClient, middleware.RateLimitConfig{
+				Key: "app-graph", Rate: 3, Interval: time.Minute,
+				LimitType: middleware.RateLimitTypeUser,
+				Message:   "code generation requests are too frequent",
+				SSE:       true,
+			}),
+			appHandler.GraphToGenCode,
+		)
+		appRoute.POST("/chat",
+			middleware.AuthMiddleware(userService),
+			middleware.RateLimitMiddleware(redisClient, middleware.RateLimitConfig{
+				Key: "app-chat", Rate: 10, Interval: time.Minute,
+				LimitType: middleware.RateLimitTypeUser,
+				Message:   "chat requests are too frequent",
+				SSE:       true,
+			}),
+			appHandler.ChatWithAgent,
+		)
 		appRoute.POST("/add", middleware.AuthMiddleware(userService), appHandler.AddApp)
 		appRoute.POST("/update", middleware.AuthMiddleware(userService), appHandler.UpdateApp)
 		appRoute.POST("/delete", middleware.AuthMiddleware(userService), appHandler.DeleteApp)

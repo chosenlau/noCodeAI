@@ -1,3 +1,5 @@
+// Archived test: references an earlier repository and obsolete constructors.
+
 package graph
 
 import (

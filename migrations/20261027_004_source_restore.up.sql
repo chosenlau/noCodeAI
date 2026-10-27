@@ -1,0 +1,4 @@
+ALTER TABLE source_version
+  ADD COLUMN snapshot_path VARCHAR(1024) NOT NULL DEFAULT '',
+  ADD COLUMN content_hash VARCHAR(64) NOT NULL DEFAULT '',
+  ADD COLUMN restored_from_id BIGINT NOT NULL DEFAULT 0;

@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -13,6 +14,8 @@ import (
 	"github.com/chosenlau/noCodeAI/internal/ai/agent"
 	aimodel "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
 	"github.com/chosenlau/noCodeAI/internal/ai/graph/state"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
+	"github.com/chosenlau/noCodeAI/internal/core/task"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
 )
@@ -71,6 +74,10 @@ func (n *CodeQualityCheckNode) execute(ctx context.Context, input *state.GraphSt
 		} else {
 			qualityResult, err := n.qualityCheckAgent.CheckCodeQuality(ctx, messages)
 			if err != nil {
+				var suspended *task.Suspended
+				if errors.As(err, &suspended) || errors.Is(err, contextmgr.ErrTooLarge) || errors.Is(err, contextmgr.ErrCommitFailed) || ctx.Err() != nil {
+					return nil, err
+				}
 				logger.Errorf("code quality check failed: %v", err)
 				qualityResult = aimodel.QualityResult{
 					IsValid: false,

@@ -1,4 +1,4 @@
-﻿package core
+package core
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 	aimodel "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
 
 	"github.com/chosenlau/noCodeAI/internal/ai/aimodel/aimessage"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
+	"github.com/chosenlau/noCodeAI/internal/core/execution"
 	"github.com/chosenlau/noCodeAI/internal/core/saver"
 
 	"github.com/chosenlau/noCodeAI/pkg/enum"
@@ -21,6 +23,33 @@ import (
 type NoCodeAIGenFacade struct {
 	codeGenFactory *agent.CodeGenAgentFactory
 	codeSaver      *saver.CodeSaver
+}
+
+// ModifyCodeStream writes through the existing file tools. Do not parse its
+// output as a whole-project JSON response or run a saver over unchanged files.
+func (y *NoCodeAIGenFacade) ModifyCodeStream(ctx context.Context, appID int64, msg []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+	w, ok := execution.WorkspaceFromContext(ctx)
+	if !ok || w.AppID != appID {
+		return nil, fmt.Errorf("modification requires this application's workspace")
+	}
+	if y == nil || y.codeGenFactory == nil || y.codeGenFactory.VueAgent == nil {
+		return nil, fmt.Errorf("project modification agent is not initialized")
+	}
+	stream, err := y.codeGenFactory.VueAgent.GenerateProjectModificationStream(ctx, msg)
+	if err != nil {
+		return nil, err
+	}
+	return y.processVueCodeStream(ctx, stream)
+}
+
+func (y *NoCodeAIGenFacade) SavedCodeDirContext(ctx context.Context, codeType enum.CodeGenTypeEnum, appID int64) (string, error) {
+	if w, ok := execution.WorkspaceFromContext(ctx); ok {
+		if w.AppID != appID {
+			return "", fmt.Errorf("workspace app mismatch")
+		}
+		return w.Root, nil
+	}
+	return y.SavedCodeDir(codeType, appID)
 }
 
 func (y *NoCodeAIGenFacade) SavedCodeDir(codeType enum.CodeGenTypeEnum, appID int64) (string, error) {
@@ -63,7 +92,9 @@ func (y *NoCodeAIGenFacade) processCodeStream(ctx context.Context, respStream *s
 			if chunk == nil {
 				continue
 			}
-			builder.WriteString(chunk.Content)
+			if contextmgr.EventKind(chunk) == "" {
+				builder.WriteString(chunk.Content)
+			}
 			if !downstreamClosed {
 				downstreamClosed = writer.Send(chunk, nil)
 			}
@@ -83,7 +114,17 @@ func (y *NoCodeAIGenFacade) processCodeStream(ctx context.Context, respStream *s
 				return
 			}
 
-			dirPath, err := y.codeSaver.SaveHtml(appID, &result)
+			var dirPath string
+			var err error
+			if w, ok := execution.WorkspaceFromContext(ctx); ok {
+				if w.AppID != appID {
+					_ = writer.Send(nil, fmt.Errorf("workspace app mismatch"))
+					return
+				}
+				dirPath, err = y.codeSaver.SaveHtmlTo(w.Root, &result)
+			} else {
+				dirPath, err = y.codeSaver.SaveHtml(appID, &result)
+			}
 			if err != nil {
 				logger.Errorf("HTML code save failed: %v", err)
 				_ = writer.Send(nil, fmt.Errorf("HTML code save failed: %w", err))
@@ -98,7 +139,17 @@ func (y *NoCodeAIGenFacade) processCodeStream(ctx context.Context, respStream *s
 				_ = writer.Send(nil, fmt.Errorf("multi-file code parse failed: %w", err))
 				return
 			}
-			dirPath, err := y.codeSaver.SaveMultiFile(appID, &result)
+			var dirPath string
+			var err error
+			if w, ok := execution.WorkspaceFromContext(ctx); ok {
+				if w.AppID != appID {
+					_ = writer.Send(nil, fmt.Errorf("workspace app mismatch"))
+					return
+				}
+				dirPath, err = y.codeSaver.SaveMultiFileTo(w.Root, &result)
+			} else {
+				dirPath, err = y.codeSaver.SaveMultiFile(appID, &result)
+			}
 			if err != nil {
 				logger.Errorf("multi-file code save failed: %v", err)
 				_ = writer.Send(nil, fmt.Errorf("multi-file code save failed: %w", err))
@@ -177,6 +228,12 @@ func (y *NoCodeAIGenFacade) processVueCodeStream(ctx context.Context, respStream
 				return
 			}
 			if msg == nil {
+				continue
+			}
+			if contextmgr.EventKind(msg) != "" {
+				if writer.Send(msg, nil) {
+					return
+				}
 				continue
 			}
 

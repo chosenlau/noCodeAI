@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -34,11 +35,18 @@ func (n *CodeGeneratorNode) execute(ctx context.Context, input *state.GraphState
 
 	logger.Info(fmt.Sprintf("%s代码生成", enum.CodeGenTypeTextMap[CodeGenType]))
 	toolCtx := context.WithValue(ctx, "appId", appID)
-	streamResp, err := n.CodeGenFacade.GenCodeStreamAndSave(toolCtx, appID, msg, CodeGenType)
+	var streamResp *schema.StreamReader[*schema.Message]
+	var err error
+	if input.WorkFlowContext.ExecutionMode == state.ModeModify || isQualityCheckFailed(input.WorkFlowContext.QualityResult) {
+		streamResp, err = n.CodeGenFacade.ModifyCodeStream(toolCtx, appID, msg)
+	} else {
+		streamResp, err = n.CodeGenFacade.GenCodeStreamAndSave(toolCtx, appID, msg, CodeGenType)
+	}
 	if err != nil {
 		logger.Errorf("代码生成失败: %v", err)
 		return nil, fmt.Errorf("代码生成失败: %w", err)
 	}
+	defer streamResp.Close()
 	for {
 		chunk, err := streamResp.Recv()
 		if err == io.EOF {
@@ -52,7 +60,7 @@ func (n *CodeGeneratorNode) execute(ctx context.Context, input *state.GraphState
 		}
 	}
 
-	generatedCodeDir, err := n.CodeGenFacade.SavedCodeDir(CodeGenType, appID)
+	generatedCodeDir, err := n.CodeGenFacade.SavedCodeDirContext(ctx, CodeGenType, appID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve generated code directory: %w", err)
 	}
@@ -73,6 +81,11 @@ func buildCodeGenMessages(workflowContext *state.WorkFlowContext) []*schema.Mess
 	userPrompt := workflowContext.EnhancedPrompt
 	if userPrompt == "" {
 		userPrompt = workflowContext.OriginalPrompt
+	}
+	userPrompt += fmt.Sprintf("\n\n本项目代码类型：%s。保留该技术栈。", workflowContext.GenerationType)
+	if workflowContext.Plan.Goal != "" {
+		plan, _ := json.Marshal(workflowContext.Plan)
+		userPrompt += "\n\n## 执行计划与剩余任务\n" + string(plan)
 	}
 	if isQualityCheckFailed(workflowContext.QualityResult) {
 		userPrompt += buildErrorFixPrompt(workflowContext.QualityResult)
@@ -108,6 +121,6 @@ func buildErrorFixPrompt(qualityResult aimodel.QualityResult) string {
 			prompt += fmt.Sprintf("- %s\n", suggestion)
 		}
 	}
-	prompt += "\n请根据上述问题和建议重新生成代码，确保修复所有提到的问题。"
+	prompt += "\n请先读取当前草稿，只修复上述问题，保留已经正确的代码和功能，不要重新生成整个项目。"
 	return prompt
 }

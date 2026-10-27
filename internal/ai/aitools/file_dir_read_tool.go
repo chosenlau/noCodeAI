@@ -9,9 +9,10 @@ import (
 	"sort"
 	"strings"
 
-	file "github.com/chosenlau/noCodeAI/pkg/myfile"
+	"github.com/chosenlau/noCodeAI/internal/core/execution"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
+	"io/fs"
 )
 
 type FileDirReadToolParams struct {
@@ -59,24 +60,31 @@ func CreateFileDirReadTool() (*FileDirReadTool, error) {
 
 func fileDirReadToolFunc(ctx context.Context, params FileDirReadToolParams) (*schema.StreamReader[*schema.ToolResult], error) {
 	relativePath := params.RelativePath
-	appId := ctx.Value("appId").(int64)
-
-	path := filepath.Clean(relativePath)
-
-	if !filepath.IsAbs(path) {
-		codeOutputRoot, err := file.GetCodeOutputRoot()
-		if err != nil {
-			return nil, fmt.Errorf("获取代码输出根目录失败: %w", err)
-		}
-		projectDirName := fmt.Sprintf("vue_project_%d", appId)
-		projectRoot := filepath.Join(codeOutputRoot, projectDirName)
-		path = filepath.Join(projectRoot, relativePath)
+	root, path, err := openToolRoot(ctx, relativePath)
+	if err != nil {
+		return nil, err
 	}
+	defer root.Close()
 
 	var result strings.Builder
-	err := filepath.Walk(path, func(walkPath string, info os.FileInfo, err error) error {
+	entries := 0
+	err = fs.WalkDir(root.FS(), filepath.ToSlash(path), func(walkPath string, entry fs.DirEntry, err error) error {
 		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
 			return nil
+		}
+		entries++
+		if entries > execution.MaxProjectFiles*2 {
+			return fmt.Errorf("directory listing exceeds entry budget")
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
 		}
 
 		relPath, err := filepath.Rel(path, walkPath)

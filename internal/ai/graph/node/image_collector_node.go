@@ -22,6 +22,9 @@ func NewImageCollectorNode(imageCollectionAgent *agent.ImageCollectionAgent) *co
 
 func (n *ImageCollectorNode) execute(ctx context.Context, input *state.GraphState) (*state.GraphState, error) {
 	logger.Info("执行节点: 图片收集")
+	if n.imageCollectionAgent == nil {
+		return nil, fmt.Errorf("image collection agent is not initialized")
+	}
 
 	workflowContext := input.WorkFlowContext
 	if workflowContext == nil {

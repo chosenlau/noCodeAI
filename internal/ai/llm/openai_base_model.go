@@ -4,13 +4,15 @@ import (
 	"context"
 
 	"github.com/chosenlau/noCodeAI/config"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 )
 
 type OpenAIChatModelWrapper struct {
 	*openai.ChatModel
-	ModelName string
+	ModelName      string
+	contextOptions contextmgr.Options
 }
 
 func NewOpenAIChatModel(cfg *config.Config) *OpenAIChatModelWrapper {
@@ -23,10 +25,13 @@ func NewOpenAIChatModel(cfg *config.Config) *OpenAIChatModelWrapper {
 		panic(err)
 	}
 	return &OpenAIChatModelWrapper{
-		ChatModel: model,
-		ModelName: cfg.AI.Model,
+		ChatModel:      model,
+		ModelName:      cfg.AI.Model,
+		contextOptions: cfg.AI.Context,
 	}
 }
+
+func (c *OpenAIChatModelWrapper) ContextOptions() contextmgr.Options { return c.contextOptions }
 
 func (c *OpenAIChatModelWrapper) GetModelName() string {
 	return c.ModelName

@@ -3,7 +3,6 @@ package node
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 
 	"github.com/bytedance/gopkg/util/logger"
 	"github.com/chosenlau/noCodeAI/internal/ai/graph/state"
@@ -28,16 +27,11 @@ func (n *ProjectBuilderNode) execute(ctx context.Context, input *state.GraphStat
 
 	generatedCodeDir := workflowContext.GenerateCodeDir
 
-	var buildResultDir string
-
-	buildSuccess := builder.BuildProject(generatedCodeDir)
-	if buildSuccess {
-		buildResultDir = filepath.Join(generatedCodeDir, "dist")
-		logger.Infof("Vue 项目构建成功，dist 目录: %s", buildResultDir)
-	} else {
-		logger.Error("Vue 项目构建失败")
-		buildResultDir = generatedCodeDir
+	result, err := builder.BuildProjectContext(ctx, generatedCodeDir)
+	if err != nil {
+		return nil, fmt.Errorf("项目构建失败: %w", err)
 	}
+	buildResultDir := result.Dist
 
 	logger.Infof("项目构建节点完成，最终目录: %s", buildResultDir)
 

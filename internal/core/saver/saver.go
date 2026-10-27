@@ -2,6 +2,7 @@ package saver
 
 import (
 	"fmt"
+	"github.com/chosenlau/noCodeAI/internal/core/execution"
 	"os"
 	"path/filepath"
 
@@ -103,6 +104,44 @@ func (s *CodeSaver) buildDir(codeType enum.CodeGenTypeEnum, appId int64) (string
 
 // writeToFile [内部私有方法] 将内容写入文件并保存
 func (s *CodeSaver) writeToFile(dirPath, fileName, content string) error {
-	filePath := filepath.Join(dirPath, fileName)
-	return os.WriteFile(filePath, []byte(content), os.ModePerm)
+	root, err := os.OpenRoot(dirPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if err := execution.CheckWrite(root, fileName, int64(len(content))); err != nil {
+		return err
+	}
+	return root.WriteFile(fileName, []byte(content), 0644)
+}
+
+// SaveHtmlTo and SaveMultiFileTo keep the shared saver stateless: each caller
+// supplies its own execution workspace.
+func (s *CodeSaver) SaveHtmlTo(dir string, response *aimodel.HtmlCodeResponse) (string, error) {
+	if response == nil || response.HtmlCode == "" {
+		return "", fmt.Errorf("empty HTML response")
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	for _, f := range []struct{ name, content string }{{"index.html", response.HtmlCode}, {"description.md", response.Description}} {
+		if err := s.writeToFile(dir, f.name, f.content); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+func (s *CodeSaver) SaveMultiFileTo(dir string, response *aimodel.MultiFileCodeResponse) (string, error) {
+	if response == nil || response.HtmlCode == "" || response.CssCode == "" || response.JsCode == "" {
+		return "", fmt.Errorf("empty multi-file response")
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return "", err
+	}
+	for _, f := range []struct{ name, content string }{{"index.html", response.HtmlCode}, {"style.css", response.CssCode}, {"script.js", response.JsCode}, {"description.md", response.Description}} {
+		if err := s.writeToFile(dir, f.name, f.content); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
 }

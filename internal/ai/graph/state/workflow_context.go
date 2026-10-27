@@ -4,6 +4,8 @@ import (
 	"sync"
 
 	ai "github.com/chosenlau/noCodeAI/internal/ai/aimodel"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
+	"github.com/chosenlau/noCodeAI/internal/core/task"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/cloudwego/eino/schema"
 )
@@ -20,6 +22,7 @@ type WorkFlowContext struct {
 	ImageList           []ai.ImageSource
 	EnhancedPrompt      string
 	GenerationType      enum.CodeGenTypeEnum
+	ExecutionMode       string
 	GenerateCodeDir     string
 	BuildResultDir      string
 	ErrorMessage        string
@@ -36,7 +39,15 @@ type WorkFlowContext struct {
 	RetryCount          int
 	MaxRetries          int
 	Description         string
+	Plan                task.Plan
+	NextNode            string
+	WorkingSummaries    map[string]contextmgr.Snapshot
 }
+
+const (
+	ModeBootstrap = "bootstrap"
+	ModeModify    = "modify"
+)
 
 type GraphState struct {
 	WorkFlowContext *WorkFlowContext

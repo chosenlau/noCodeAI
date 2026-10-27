@@ -28,6 +28,9 @@ type ImageSearchTool struct {
 }
 
 func CreateImageSearchTool(cfg *config.Config) (*ImageSearchTool, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config is required")
+	}
 	streamTool, err := utils.InferStreamTool("imageSearch", "搜索内容相关的图片，用于网站内容展示", imageSearchToolFunc(cfg.Pexels.APIKey))
 	if err != nil {
 		return nil, err

@@ -10,9 +10,12 @@ import (
 	"github.com/bytedance/gopkg/util/logger"
 	"github.com/chosenlau/noCodeAI/internal/ai/agent"
 	"github.com/chosenlau/noCodeAI/internal/api"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
+	"github.com/chosenlau/noCodeAI/internal/core/execution"
 	"github.com/chosenlau/noCodeAI/internal/core/store"
 	"github.com/chosenlau/noCodeAI/internal/dal/model"
 	"github.com/chosenlau/noCodeAI/internal/dal/query"
+	"github.com/chosenlau/noCodeAI/internal/dal/taskstore"
 	"github.com/chosenlau/noCodeAI/pkg/enum"
 	"github.com/chosenlau/noCodeAI/pkg/errorutil"
 	"github.com/chosenlau/noCodeAI/pkg/response"
@@ -223,7 +226,7 @@ func (s *ChatHistoryService) AddChatMessage(ctx context.Context, appId int64,
 
 		lastMessage, err := tx.ChatHistory.WithContext(ctx).
 			Where(tx.ChatHistory.AppID.Eq(appId), tx.ChatHistory.IsDelete.Eq(0)).
-			Order(tx.ChatHistory.CreateTime.Desc(), tx.ChatHistory.ID.Desc()).
+			Order(tx.ChatHistory.TurnNumber.Desc(), tx.ChatHistory.CreateTime.Desc(), tx.ChatHistory.ID.Desc()).
 			First()
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -270,16 +273,8 @@ func (s *ChatHistoryService) MaybeGenerateSummary(ctx context.Context, appId int
 	if s.db == nil || s.memoryStore == nil || s.summaryAgent == nil {
 		return
 	}
-	q := query.Use(s.db)
-	lastMessage, err := q.ChatHistory.WithContext(ctx).
-		Where(
-			q.ChatHistory.AppID.Eq(appId),
-			q.ChatHistory.IsDelete.Eq(0),
-			q.ChatHistory.MessageType.Eq(string(enum.AIMessageType)),
-		).
-		Order(q.ChatHistory.CreateTime.Desc(), q.ChatHistory.ID.Desc()).
-		First()
-	if err != nil || lastMessage.TurnNumber < 20 {
+	_, records, err := s.loadUncoveredConversation(ctx, appId)
+	if err != nil || !needsConversationSummary(records) {
 		return
 	}
 	go s.generateSummary(context.Background(), appId, userId)
@@ -298,15 +293,20 @@ func (s *ChatHistoryService) IsSummarizing(ctx context.Context, appId int64) (bo
 
 // generateSummary creates a compact conversation summary.
 func (s *ChatHistoryService) generateSummary(ctx context.Context, appId int64, userId int64) {
-	locker, ok := s.memoryStore.(store.DistributedLocker)
-	if ok {
-		unlock, err := locker.Lock(ctx, "summary:"+strconv.FormatInt(appId, 10))
-		if err != nil {
-			logger.Infof("summary already in progress for app %d", appId)
-			return
-		}
-		defer unlock()
+	locker, ok := s.memoryStore.(store.LeaseLocker)
+	if !ok || s.db == nil {
+		return
 	}
+	id, err := snowflake.GenerateSnowFlakeId()
+	if err != nil {
+		return
+	}
+	ctx, lease, err := execution.Acquire(ctx, locker, taskstore.NewExecutionStore(s.db), appId, "summary-"+strconv.FormatInt(id, 10), execution.NewBudget(execution.BudgetOptions{}))
+	if err != nil {
+		logger.Infof("summary deferred for app %d: %v", appId, err)
+		return
+	}
+	defer lease.Release()
 
 	if s.summaryAgent == nil {
 		logger.Warn("summary agent is not initialized")
@@ -325,30 +325,62 @@ func (s *ChatHistoryService) generateSummary(ctx context.Context, appId int64, u
 		return
 	}
 	metadata.Summarizing = true
+	summaryOwner := strconv.FormatInt(id, 10)
+	metadata.SummaryOwner = summaryOwner
 	metadata.SummaryError = ""
 	if err := s.memoryStore.SetMetadata(ctx, memoryID, metadata); err != nil {
 		logger.Errorf("mark summary as running failed: %v", err)
 		return
 	}
 	defer func() {
+		// Clear only this attempt's running flag after cancellation/lease loss.
+		if cleaner, ok := s.memoryStore.(interface {
+			ClearSummaryOwner(context.Context, string, string) error
+		}); ok {
+			defer func() {
+				cleanup, done := context.WithTimeout(context.Background(), 3*time.Second)
+				defer done()
+				_ = cleaner.ClearSummaryOwner(cleanup, memoryID, summaryOwner)
+			}()
+		}
 		metadata.Summarizing = false
 		metadata.UpdatedAt = time.Now()
-		if err := s.memoryStore.SetMetadata(context.Background(), memoryID, metadata); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := s.memoryStore.SetMetadata(ctx, memoryID, metadata); err != nil {
 			logger.Errorf("mark summary as finished failed: %v", err)
 		}
 	}()
 
-	messages, err := s.memoryStore.GetMessages(ctx, memoryID)
+	previous, records, err := s.loadUncoveredConversation(ctx, appId)
 	if err != nil {
 		logger.Errorf("load conversation memory failed: %v", err)
 		return
 	}
-	if len(messages) == 0 {
+	if !needsConversationSummary(records) {
 		logger.Info("skip summary because conversation memory is empty")
 		return
 	}
 
-	result, err := s.summaryAgent.SummarizeChat(ctx, messages)
+	keep := 12
+	if contextmgr.Estimate(records) > 12000 {
+		keep = 2
+	}
+	cutoff, canSummarize := conversationSummaryCutoff(records, keep)
+	if !canSummarize {
+		return
+	}
+	var messages []*schema.Message
+	if previous != nil {
+		messages = append(messages, schema.SystemMessage(previous.Message))
+	}
+	for _, r := range records {
+		if r.TurnNumber <= cutoff {
+			messages = append(messages, historyMessage(r))
+		}
+	}
+	result, err := s.summarizeConversationBatches(ctx, messages)
 	if err != nil {
 		logger.Errorf("generate chat summary failed: %v", err)
 		metadata.SummaryError = err.Error()
@@ -359,7 +391,11 @@ func (s *ChatHistoryService) generateSummary(ctx context.Context, appId int64, u
 		return
 	}
 
-	err = s.AddChatMessage(ctx, appId, summary, enum.SummaryMessageType, userId)
+	id, idErr := snowflake.GenerateSnowFlakeId()
+	if idErr != nil {
+		return
+	}
+	err = query.Use(s.db).ChatHistory.WithContext(ctx).Create(&model.ChatHistory{ID: id, AppID: appId, UserID: userId, Message: summary, MessageType: string(enum.SummaryMessageType), TurnNumber: cutoff})
 	if err != nil {
 		logger.Errorf("save chat summary failed: %v", err)
 		return
@@ -386,7 +422,7 @@ func (s *ChatHistoryService) generateSummary(ctx context.Context, appId int64, u
 			logger.Errorf("save chat summary to memory failed: %v", err)
 			return
 		}
-		if err := s.retainRecentMessages(ctx, appId, 6); err != nil {
+		if _, err := s.LoadChatHistoryToMemory(ctx, appId, s.memoryStore, 20); err != nil {
 			logger.Errorf("trim recent conversation memory failed: %v", err)
 		}
 	}
@@ -534,7 +570,7 @@ func (s *ChatHistoryService) LoadChatHistoryToMemory(
 		q.MessageType.Neq(string(enum.SummaryMessageType)),
 	)
 	if summaryMsg != nil {
-		recentQuery = recentQuery.Where(q.CreateTime.Gt(summaryMsg.CreateTime))
+		recentQuery = recentQuery.Where(q.TurnNumber.Gt(summaryMsg.TurnNumber))
 	}
 
 	recentHistory, err := recentQuery.
@@ -588,20 +624,23 @@ func (s *ChatHistoryService) EnsureMemoryLoaded(ctx context.Context, appId int64
 	if err := s.restoreTotalTokenUsage(ctx, appId, memoryID); err != nil {
 		return nil, err
 	}
-	messages, err := s.memoryStore.GetMessages(ctx, memoryID)
+	// Redis is a bounded cache, never the authority for unsummarized material.
+	// Read uncovered SQL records even while a background summary is deferred.
+	previous, records, err := s.loadUncoveredConversation(ctx, appId)
 	if err != nil {
 		return nil, err
 	}
-	if len(messages) > 0 {
-		return messages, nil
+	var messages []*schema.Message
+	if previous != nil {
+		messages = append(messages, schema.SystemMessage(previous.Message))
 	}
-	if s.db == nil {
-		return messages, nil
+	for _, r := range records {
+		messages = append(messages, historyMessage(r))
 	}
-	if _, err := s.LoadChatHistoryToMemory(ctx, appId, s.memoryStore, maxCount); err != nil {
-		return nil, err
+	if s.summaryAgent != nil {
+		return s.summaryAgent.CompactHistory(ctx, messages)
 	}
-	return s.memoryStore.GetMessages(ctx, memoryID)
+	return messages, nil
 }
 
 func (s *ChatHistoryService) restoreTotalTokenUsage(ctx context.Context, appID int64, memoryID string) error {

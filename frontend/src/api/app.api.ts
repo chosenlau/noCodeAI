@@ -1,4 +1,9 @@
 import api from './config';
+
+export interface SourceVersions {
+  currentVersionId: string;
+  versions: { id: string; createdAt: string; current: boolean; restorable: boolean; restoredFromId: string }[];
+}
 import type {
   AppVo,
   UpdateAppRequest,
@@ -7,6 +12,9 @@ import type {
 } from '@/types/api';
 
 export const appApi = {
+  listVersions: (appId: string) => api.get(`/app/${appId}/versions`) as Promise<SourceVersions>,
+  restoreVersion: (appId: string, versionId: string, expectedVersionId: string) =>
+    api.post(`/app/${appId}/versions/restore`, { versionId, expectedVersionId }) as Promise<string>,
   listFeatured: (query: AppQueryRequest) =>
     api.post('/app/good/list/page/vo', query) as Promise<PageResult<AppVo>>,
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -27,8 +28,17 @@ type MultiFileCodeGenAgent struct {
 }
 type VueCodeGenAgent struct {
 	*BaseAgent
-	adkAgent *adk.ChatModelAgent
+	adkAgent    *adk.ChatModelAgent
+	modifyAgent *adk.ChatModelAgent
 }
+
+// Shared file-tool implementation for all project types, independent of the Vue prompt.
+const ProjectModifyInstruction = `你是网站项目维护 Agent。当前工作目录已经包含项目代码。
+首先使用 readDir 查看目录，使用 readFile 阅读与任务有关的现有文件，再通过 modifyFile、writeFile、deleteFile 完成必要修改。
+保留项目原技术栈、文件结构、现有页面和未要求修改的功能。不要把 HTML 项目转换成 Vue，不要重新生成整个项目。
+修改前确认旧内容，优先进行小范围修改；新需求确实需要时可以创建或删除文件。
+质检失败时只修复当前草稿的问题，不要重置草稿。实际文件必须通过工具落盘，不能仅在回复里输出代码。
+完成后更新 description.md，用普通用户能理解的中文说明本次变化，然后结束。`
 
 // NewHtmlCodeGenAgent 创建 HTML 代码生成 Agent 单例
 func NewHtmlCodeGenAgent(
@@ -106,9 +116,17 @@ func NewVueCodeGenAgent(
 	)
 
 	return &VueCodeGenAgent{
-		BaseAgent: baseAgent,
-		adkAgent:  adkAgent,
+		BaseAgent:   baseAgent,
+		adkAgent:    adkAgent,
+		modifyAgent: baseAgent.NewAdkAgent("ProjectModifyAgent", "Modify an existing website using its original stack", ProjectModifyInstruction, tools),
 	}
+}
+
+func (a *VueCodeGenAgent) GenerateProjectModificationStream(ctx context.Context, msg []*schema.Message) (*schema.StreamReader[*schema.Message], error) {
+	if a == nil || a.modifyAgent == nil {
+		return nil, fmt.Errorf("project modification agent is not initialized")
+	}
+	return a.GenerateStream(ctx, msg, a.modifyAgent)
 }
 
 func (a *HtmlCodeGenAgent) GenerateHtmlCode(ctx context.Context, msg []*schema.Message) (*aimodel.HtmlCodeResponse, error) {

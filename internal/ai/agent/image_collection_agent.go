@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/chosenlau/noCodeAI/internal/ai/aitools"
 	"github.com/chosenlau/noCodeAI/internal/ai/prompt"
@@ -40,9 +41,9 @@ func NewImageCollectionAgent(
 	if mermaidDiagramTool != nil {
 		tools = append(tools, mermaidDiagramTool.BaseTool)
 	}
-	if logoGeneratorTool != nil {
-		tools = append(tools, logoGeneratorTool.BaseTool)
-	}
+	// if logoGeneratorTool != nil {
+	// 	tools = append(tools, logoGeneratorTool.BaseTool)
+	// }
 
 	adkAgent := baseAgent.NewAdkAgent(
 		"图片收集助手",
@@ -61,6 +62,9 @@ func (a *ImageCollectionAgent) CollectImages(ctx context.Context, messages []*sc
 	result, err := a.Generate(ctx, messages, a.adkAgent)
 	if err != nil {
 		return nil, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("image collection agent returned an empty response")
 	}
 
 	return result, nil

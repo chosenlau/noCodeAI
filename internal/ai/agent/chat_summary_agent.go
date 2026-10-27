@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/chosenlau/noCodeAI/internal/ai/prompt"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
 	"github.com/chosenlau/noCodeAI/internal/monitor"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
@@ -39,10 +40,19 @@ func NewChatSummaryAgent(
 }
 
 func (a *ChatSummaryAgent) SummarizeChat(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
-	result, err := a.Generate(ctx, messages, a.adkAgent)
+	result, err := a.Generate(contextmgr.WithoutCompact(ctx), messages, a.adkAgent)
 	if err != nil {
 		return nil, err
 	}
 
 	return result, nil
+}
+
+func (a *ChatSummaryAgent) ContextInputLimit() int { return a.contextOptions.InputLimit() }
+
+// CompactHistory operates before Graph flattens messages into OriginalPrompt.
+// It shares the existing model/budget but does not mutate durable chat history.
+func (a *ChatSummaryAgent) CompactHistory(ctx context.Context, messages []*schema.Message) ([]*schema.Message, error) {
+	m := &contextMiddleware{model: a.model, options: a.contextOptions}
+	return contextmgr.New(a.contextOptions, "conversation-input", m.summarize, nil).Assemble(ctx, messages, 0)
 }

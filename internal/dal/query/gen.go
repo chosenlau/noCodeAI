@@ -16,34 +16,62 @@ import (
 )
 
 var (
-	Q           = new(Query)
-	App         *app
-	ChatHistory *chatHistory
-	User        *user
+	Q             = new(Query)
+	AgentRun      *agentRun
+	App           *app
+	AppExecution  *appExecution
+	ChatHistory   *chatHistory
+	RunCheckpoint *runCheckpoint
+	RunEvent      *runEvent
+	SourceVersion *sourceVersion
+	TaskOutbox    *taskOutbox
+	ToolExecution *toolExecution
+	User          *user
 )
 
 func SetDefault(db *gorm.DB, opts ...gen.DOOption) {
 	*Q = *Use(db, opts...)
+	AgentRun = &Q.AgentRun
 	App = &Q.App
+	AppExecution = &Q.AppExecution
 	ChatHistory = &Q.ChatHistory
+	RunCheckpoint = &Q.RunCheckpoint
+	RunEvent = &Q.RunEvent
+	SourceVersion = &Q.SourceVersion
+	TaskOutbox = &Q.TaskOutbox
+	ToolExecution = &Q.ToolExecution
 	User = &Q.User
 }
 
 func Use(db *gorm.DB, opts ...gen.DOOption) *Query {
 	return &Query{
-		db:          db,
-		App:         newApp(db, opts...),
-		ChatHistory: newChatHistory(db, opts...),
-		User:        newUser(db, opts...),
+		db:            db,
+		AgentRun:      newAgentRun(db, opts...),
+		App:           newApp(db, opts...),
+		AppExecution:  newAppExecution(db, opts...),
+		ChatHistory:   newChatHistory(db, opts...),
+		RunCheckpoint: newRunCheckpoint(db, opts...),
+		RunEvent:      newRunEvent(db, opts...),
+		SourceVersion: newSourceVersion(db, opts...),
+		TaskOutbox:    newTaskOutbox(db, opts...),
+		ToolExecution: newToolExecution(db, opts...),
+		User:          newUser(db, opts...),
 	}
 }
 
 type Query struct {
 	db *gorm.DB
 
-	App         app
-	ChatHistory chatHistory
-	User        user
+	AgentRun      agentRun
+	App           app
+	AppExecution  appExecution
+	ChatHistory   chatHistory
+	RunCheckpoint runCheckpoint
+	RunEvent      runEvent
+	SourceVersion sourceVersion
+	TaskOutbox    taskOutbox
+	ToolExecution toolExecution
+	User          user
 }
 
 func (q *Query) Available() bool { return q.db != nil }
@@ -52,10 +80,17 @@ func (q *Query) UnderlyingDB() *gorm.DB { return q.db }
 
 func (q *Query) clone(db *gorm.DB) *Query {
 	return &Query{
-		db:          db,
-		App:         q.App.clone(db),
-		ChatHistory: q.ChatHistory.clone(db),
-		User:        q.User.clone(db),
+		db:            db,
+		AgentRun:      q.AgentRun.clone(db),
+		App:           q.App.clone(db),
+		AppExecution:  q.AppExecution.clone(db),
+		ChatHistory:   q.ChatHistory.clone(db),
+		RunCheckpoint: q.RunCheckpoint.clone(db),
+		RunEvent:      q.RunEvent.clone(db),
+		SourceVersion: q.SourceVersion.clone(db),
+		TaskOutbox:    q.TaskOutbox.clone(db),
+		ToolExecution: q.ToolExecution.clone(db),
+		User:          q.User.clone(db),
 	}
 }
 
@@ -69,24 +104,45 @@ func (q *Query) WriteDB() *Query {
 
 func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 	return &Query{
-		db:          db,
-		App:         q.App.replaceDB(db),
-		ChatHistory: q.ChatHistory.replaceDB(db),
-		User:        q.User.replaceDB(db),
+		db:            db,
+		AgentRun:      q.AgentRun.replaceDB(db),
+		App:           q.App.replaceDB(db),
+		AppExecution:  q.AppExecution.replaceDB(db),
+		ChatHistory:   q.ChatHistory.replaceDB(db),
+		RunCheckpoint: q.RunCheckpoint.replaceDB(db),
+		RunEvent:      q.RunEvent.replaceDB(db),
+		SourceVersion: q.SourceVersion.replaceDB(db),
+		TaskOutbox:    q.TaskOutbox.replaceDB(db),
+		ToolExecution: q.ToolExecution.replaceDB(db),
+		User:          q.User.replaceDB(db),
 	}
 }
 
 type queryCtx struct {
-	App         IAppDo
-	ChatHistory IChatHistoryDo
-	User        IUserDo
+	AgentRun      IAgentRunDo
+	App           IAppDo
+	AppExecution  IAppExecutionDo
+	ChatHistory   IChatHistoryDo
+	RunCheckpoint IRunCheckpointDo
+	RunEvent      IRunEventDo
+	SourceVersion ISourceVersionDo
+	TaskOutbox    ITaskOutboxDo
+	ToolExecution IToolExecutionDo
+	User          IUserDo
 }
 
 func (q *Query) WithContext(ctx context.Context) *queryCtx {
 	return &queryCtx{
-		App:         q.App.WithContext(ctx),
-		ChatHistory: q.ChatHistory.WithContext(ctx),
-		User:        q.User.WithContext(ctx),
+		AgentRun:      q.AgentRun.WithContext(ctx),
+		App:           q.App.WithContext(ctx),
+		AppExecution:  q.AppExecution.WithContext(ctx),
+		ChatHistory:   q.ChatHistory.WithContext(ctx),
+		RunCheckpoint: q.RunCheckpoint.WithContext(ctx),
+		RunEvent:      q.RunEvent.WithContext(ctx),
+		SourceVersion: q.SourceVersion.WithContext(ctx),
+		TaskOutbox:    q.TaskOutbox.WithContext(ctx),
+		ToolExecution: q.ToolExecution.WithContext(ctx),
+		User:          q.User.WithContext(ctx),
 	}
 }
 

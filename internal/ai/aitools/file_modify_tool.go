@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	file "github.com/chosenlau/noCodeAI/pkg/myfile"
+	"github.com/chosenlau/noCodeAI/internal/core/execution"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
-	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -53,42 +51,36 @@ func fileModifyToolFunc(ctx context.Context, params FileModifyToolParams) (*sche
 	relativeFilePath := params.RelativeFilePath
 	oldContent := params.OldContent
 	newContent := params.NewContent
-	appId := ctx.Value("appId").(int64)
-
-	path := filepath.Clean(relativeFilePath)
-
-	if !filepath.IsAbs(path) {
-		codeOutputRoot, err := file.GetCodeOutputRoot()
-		if err != nil {
-			return nil, fmt.Errorf("获取代码输出根目录失败: %w", err)
-		}
-		projectDirName := fmt.Sprintf("vue_project_%d", appId)
-		projectRoot := filepath.Join(codeOutputRoot, projectDirName)
-		path = filepath.Join(projectRoot, relativeFilePath)
-	}
-
-	content, err := os.ReadFile(path)
+	root, path, err := openToolRoot(ctx, relativeFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("文件读取失败: %s, 错误: %v", relativeFilePath, err)
-	}
-
-	newFileContent := strings.ReplaceAll(string(content), oldContent, newContent)
-
-	err = os.WriteFile(path, []byte(newFileContent), 0644)
-	if err != nil {
-		return nil, fmt.Errorf("文件写入失败: %s, 错误: %v", relativeFilePath, err)
-	}
-	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	fmt.Printf("成功修改文件: %s\n", path)
-
-	result := &schema.ToolResult{
-		Parts: []schema.ToolOutputPart{
-			{Type: schema.ToolPartTypeText, Text: "文件修改成功: " + relativeFilePath},
-		},
-	}
-
-	return schema.StreamReaderFromArray([]*schema.ToolResult{result}), nil
+	defer root.Close()
+	return journalMutation(ctx, "modifyFile", params, func() (string, error) {
+		if oldContent == "" {
+			return "", fmt.Errorf("oldContent must not be empty")
+		}
+		content, err := execution.ReadFile(root, path)
+		if err != nil {
+			return "", err
+		}
+		if !strings.Contains(string(content), oldContent) {
+			return "", fmt.Errorf("old content does not match")
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		resultSize := int64(len(content)) + int64(strings.Count(string(content), oldContent))*int64(len(newContent)-len(oldContent))
+		if resultSize > execution.MaxFileBytes {
+			return "", fmt.Errorf("modified file exceeds size budget")
+		}
+		updated := strings.ReplaceAll(string(content), oldContent, newContent)
+		if err := execution.CheckWrite(root, path, int64(len(updated))); err != nil {
+			return "", err
+		}
+		if err := root.WriteFile(path, []byte(updated), 0644); err != nil {
+			return "", err
+		}
+		return "文件修改成功: " + relativeFilePath, nil
+	})
 }

@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/bytedance/gopkg/util/logger"
 	"github.com/chosenlau/noCodeAI/internal/ai/agent/agentmiddleware"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
+	"github.com/chosenlau/noCodeAI/internal/core/execution"
 	"github.com/chosenlau/noCodeAI/internal/monitor"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
@@ -28,15 +31,21 @@ type BaseAgent struct {
 	middleware       *agentmiddleware.AgentMiddleware
 	metricsCollector *monitor.AiModelMetricsCollector
 	checkpointStore  adk.CheckPointStore
+	contextOptions   contextmgr.Options
 }
 
 func NewBaseAgent(model ChatModelWrapperAdaptor, metricsCollector *monitor.AiModelMetricsCollector, checkpointStore adk.CheckPointStore, agentMiddleware *agentmiddleware.AgentMiddleware) *BaseAgent {
+	var options contextmgr.Options
+	if provider, ok := model.(contextOptionsProvider); ok {
+		options = provider.ContextOptions()
+	}
 	return &BaseAgent{
-		model:            model.GetChatModel(),
+		model:            &budgetModel{inner: model.GetChatModel(), outputLimit: options.OutputLimit()},
 		modelName:        model.GetModelName(),
 		metricsCollector: metricsCollector,
 		checkpointStore:  checkpointStore,
 		middleware:       agentMiddleware,
+		contextOptions:   options,
 	}
 }
 
@@ -58,8 +67,11 @@ func (a *BaseAgent) NewAdkAgent(name, description, instruction string, tools []t
 		ModelRetryConfig: &adk.ModelRetryConfig{
 			MaxRetries: 3,
 			IsRetryAble: func(ctx context.Context, err error) bool {
-				if errors.Is(err, context.Canceled) {
+				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, execution.ErrBudgetExceeded) || errors.Is(err, contextmgr.ErrTooLarge) {
 					return false
+				}
+				if budget := execution.GetBudget(ctx); budget != nil {
+					return budget.ConsumeRetry() == nil
 				}
 				return true
 			},
@@ -69,6 +81,7 @@ func (a *BaseAgent) NewAdkAgent(name, description, instruction string, tools []t
 	if a.middleware != nil {
 		config.Handlers = []adk.ChatModelAgentMiddleware{a.middleware}
 	}
+	config.Handlers = append(config.Handlers, &contextMiddleware{name: name, options: a.contextOptions, model: a.model})
 	ctx := context.Background()
 	agent, err := adk.NewChatModelAgent(ctx, config)
 	if err != nil {
@@ -149,15 +162,32 @@ func (a *BaseAgent) Generate(ctx context.Context, messages []*schema.Message, ad
 				"total", float64(tokenUsage.PromptTokens+tokenUsage.CompletionTokens))
 		}
 	}
-	if resultMsg != nil && resultMsg.ResponseMeta != nil {
-		recordTokenUsage(ctx, resultMsg.ResponseMeta.Usage)
-	}
 
 	return resultMsg, nil
 }
 
 func (a *BaseAgent) GenerateStream(ctx context.Context, messages []*schema.Message, adkAgent *adk.ChatModelAgent) (*schema.StreamReader[*schema.Message], error) {
 	monitorContext := monitor.GetMonitorContext(ctx)
+	reader, writer := schema.Pipe[*schema.Message](2)
+	var eventMu sync.Mutex
+	streamClosed := false
+	closeWriter := func() {
+		eventMu.Lock()
+		defer eventMu.Unlock()
+		streamClosed = true
+		writer.Close()
+	}
+	// Graph already owns its durable binding and semantic event callback.
+	// Foreground streams carry status in metadata, never in generated content.
+	if contextmgr.GetBinding(ctx) == nil {
+		ctx = contextmgr.WithBinding(ctx, &contextmgr.Binding{Notify: func(kind string) {
+			eventMu.Lock()
+			defer eventMu.Unlock()
+			if !streamClosed {
+				_ = writer.Send(contextmgr.EventMessage(kind), nil)
+			}
+		}})
+	}
 
 	runnerConfig := adk.RunnerConfig{
 		Agent:           adkAgent,
@@ -177,6 +207,8 @@ func (a *BaseAgent) GenerateStream(ctx context.Context, messages []*schema.Messa
 			if a.metricsCollector != nil && monitorContext != nil {
 				a.metricsCollector.RecordError(monitorContext.UserId, monitorContext.AppId, a.modelName, err.Error())
 			}
+			reader.Close()
+			closeWriter()
 			return nil, err
 		}
 		iter = runner.Run(ctx, messages, adk.WithCheckPointID(checkpointID))
@@ -184,10 +216,8 @@ func (a *BaseAgent) GenerateStream(ctx context.Context, messages []*schema.Messa
 		iter = runner.Run(ctx, messages)
 	}
 
-	reader, writer := schema.Pipe[*schema.Message](2)
-
 	go func() {
-		defer writer.Close()
+		defer closeWriter()
 		var fullContent string
 		var lastTokenUsage *schema.TokenUsage
 		var streamErr error
@@ -275,7 +305,6 @@ func (a *BaseAgent) GenerateStream(ctx context.Context, messages []*schema.Messa
 				}
 			}
 		}
-		recordTokenUsage(ctx, lastTokenUsage)
 	}()
 
 	return reader, nil

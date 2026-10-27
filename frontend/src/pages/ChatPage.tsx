@@ -17,6 +17,7 @@ import {
 import Editor from '@monaco-editor/react';
 import { SandpackPreview, SandpackProvider } from '@codesandbox/sandpack-react';
 import { appApi, chatApi } from '@/api';
+import type { GraphRun } from '@/api/chat.api';
 import logoUrl from '@/assets/NoCodeAI.svg';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -45,6 +46,8 @@ interface WorkflowStep {
 }
 
 interface ToolEvent {
+	 id?: string;
+	 index?: number;
   type: 'tool_request' | 'tool_executed';
   name: string;
   arguments?: string;
@@ -416,6 +419,11 @@ function WorkflowTaskCard({
 
 export default function ChatPage() {
   const { appId } = useParams<{ appId: string }>();
+  return <ChatSession key={appId} />;
+}
+
+function ChatSession() {
+  const { appId } = useParams<{ appId: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const [message, setMessage] = useState('');
@@ -431,6 +439,11 @@ export default function ChatPage() {
   const [activePanel, setActivePanel] = useState<'source' | 'preview'>('preview');
   const [isGenerating, setIsGenerating] = useState(false);
   const [useGraph, setUseGraph] = useState(false);
+  const [controlledRun, setControlledRun] = useState<GraphRun | null>(null);
+  const [controlBusy, setControlBusy] = useState(false);
+  const [showVersions, setShowVersions] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [runDiscoveryDone, setRunDiscoveryDone] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [chatPaneWidth, setChatPaneWidth] = useState(50);
   const [fileListWidth, setFileListWidth] = useState(220);
@@ -444,6 +457,23 @@ export default function ChatPage() {
   const sandpackFiles = useMemo(() => getSandpackFiles(generatedFiles), [generatedFiles]);
   const fileTree = useMemo(() => buildFileTree(generatedFiles), [generatedFiles]);
   const activeTask = activeTaskId ? workflowTasks[activeTaskId] : undefined;
+
+  // Poll only the persisted task currently observed by this page. This also
+  // discovers the safe-point status after the SSE subscription has closed.
+  useEffect(() => {
+    if (!appId || !useGraph) return;
+    let canceled = false;
+    const refresh = async () => {
+      try {
+        const stored = sessionStorage.getItem(`graph-run:${appId}`);
+        const id = stored ? (JSON.parse(stored) as { runId?: string }).runId : undefined;
+        if (id) { const run = await chatApi.getGraphRun(id); if (!canceled) setControlledRun(run); }
+      } catch { /* SSE reports connection errors; retain the last known state. */ }
+    };
+    void refresh();
+    const timer = window.setInterval(() => void refresh(), 1500);
+    return () => { canceled = true; window.clearInterval(timer); };
+  }, [appId, useGraph]);
 
   const updateWorkflowTask = (
     taskId: string,
@@ -522,15 +552,45 @@ export default function ChatPage() {
     enabled: activePanel === 'source' && !!appId && !!appQuery.data,
   });
 
+  const versionsQuery = useQuery({
+    queryKey: ['sourceVersions', appId],
+    queryFn: () => appApi.listVersions(appId!),
+    enabled: showVersions && !!appId,
+    refetchInterval: showVersions && isGenerating ? 3000 : false,
+  });
+  const hasActiveRun = !!controlledRun && !['completed', 'failed', 'interrupted', 'canceled'].includes(controlledRun.status);
+  const restoreVersion = async (versionId: string) => {
+    if (!appId || !versionsQuery.data || restoreBusy || isGenerating || hasActiveRun || !runDiscoveryDone) return;
+    setRestoreBusy(true);
+    try {
+      await appApi.restoreVersion(appId, versionId, versionsQuery.data.currentVersionId);
+      const files = normalizeGeneratedFiles(await appApi.getSourceCode(appId, ''));
+      const firstFile = Object.keys(files)[0] ?? '';
+      setGeneratedFiles(files);
+      setSelectedFile(firstFile);
+      setGeneratedCode(firstFile ? files[firstFile] : '');
+      setActivePanel('preview');
+      await Promise.all([appQuery.refetch(), sourceCodeQuery.refetch(), versionsQuery.refetch()]);
+      toast({ title: '已恢复网站', description: '恢复前的版本仍保留在历史记录中。' });
+    } catch (error) {
+      toast({ variant: 'destructive', title: '未能完成恢复', description: error instanceof Error ? error.message : '请稍后重试' });
+      void versionsQuery.refetch();
+    } finally { setRestoreBusy(false); }
+  };
+
   useEffect(() => {
-    if (activePanel === 'source' && sourceCodeQuery.data) {
+    if (showVersions && !isGenerating) void versionsQuery.refetch();
+  }, [showVersions, isGenerating, controlledRun?.status]);
+
+  useEffect(() => {
+    if (activePanel === 'source' && sourceCodeQuery.data && !activeTaskId) {
       const files = normalizeGeneratedFiles(sourceCodeQuery.data);
       const firstFile = Object.keys(files)[0] ?? '';
       setGeneratedFiles(files);
       setSelectedFile((current) => current && files[current] ? current : firstFile);
       setGeneratedCode((current) => current || (firstFile ? files[firstFile] : ''));
     }
-  }, [activePanel, sourceCodeQuery.data]);
+  }, [activePanel, sourceCodeQuery.data, activeTaskId]);
 
   useEffect(() => {
     setExpandedFolders(new Set(collectFolderPaths(fileTree)));
@@ -574,13 +634,16 @@ export default function ChatPage() {
     return () => window.clearInterval(timer);
   }, [isGenerating]);
 
-  const handleSendMessage = async (requestedMessage?: string) => {
+  const handleSendMessage = async (requestedMessage?: string, resumeRunId?: string) => {
     const trimmedMessage = (requestedMessage ?? message).trim();
-    if (!trimmedMessage || !appId || isGenerating) return;
+    const isResume = Boolean(resumeRunId);
+    if ((!trimmedMessage && !isResume) || !appId || isGenerating || restoreBusy) return;
 
-    const taskId = `workflow-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const isGraphRequest = useGraph;
-    setChatHistory((previous) => [...previous, {
+    const taskId = resumeRunId
+      ? `workflow-run-${resumeRunId}`
+      : `workflow-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const isGraphRequest = isResume || useGraph;
+    if (!isResume) setChatHistory((previous) => [...previous, {
       id: Date.now().toString(),
       message: trimmedMessage,
       messageType: 'user',
@@ -600,6 +663,11 @@ export default function ChatPage() {
       createTime: new Date().toISOString(),
       updateTime: new Date().toISOString(),
       isDelete: 0,
+    }]);
+    if (isResume) setChatHistory((previous) => previous.some((item) => item.id === taskId) ? previous : [...previous, {
+      id: taskId, message: '', messageType: 'ai', appId, userId: '',
+      turnNumber: previous.length + 1, createTime: new Date().toISOString(),
+      updateTime: new Date().toISOString(), isDelete: 0,
     }]);
     if (isGraphRequest) {
       setWorkflowTasks((previous) => ({
@@ -626,10 +694,13 @@ export default function ChatPage() {
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
+    let streamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
     try {
       const response = isGraphRequest
-        ? await chatApi.generateCode(appId, trimmedMessage, controller.signal)
+        ? resumeRunId
+          ? await chatApi.observeGraphRun(appId, resumeRunId, controller.signal)
+          : await chatApi.generateCode(appId, trimmedMessage, controller.signal)
         : await chatApi.chatWithAgent(appId, trimmedMessage, controller.signal);
       if (!response.ok || !response.body) {
         throw new Error(`请求失败 (${response.status})`);
@@ -649,6 +720,7 @@ export default function ChatPage() {
       }
 
       const reader = response.body.getReader();
+      streamReader = reader;
       const decoder = new TextDecoder();
       let buffer = '';
       let finished = false;
@@ -679,6 +751,17 @@ export default function ChatPage() {
               if (!last || last.id !== taskId) return previous;
               return [...previous.slice(0, -1), { ...last, message: `${last.message}${assistantText}` }];
             });
+          } else if (eventName === 'run_canceled' || eventName === 'run_control') {
+            const state = JSON.parse(data) as { status?: string };
+            if (state.status === 'canceled') {
+              updateWorkflowTask(taskId, { status: '任务已终止，草稿未发布', isGenerating: false });
+              return;
+            }
+          } else if (eventName === 'connection_status') {
+            updateWorkflowTask(taskId, { status: data });
+          } else if (eventName === 'context_compacting' || eventName === 'context_ready') {
+            updateWorkflowTask(taskId, { status: eventName === 'context_compacting'
+              ? '正在整理任务信息，随后继续' : '任务信息整理结束' });
           } else if (eventName === 'step_started') {
             const step = JSON.parse(data) as WorkflowStep;
             if (step.currentStep) {
@@ -703,8 +786,8 @@ export default function ChatPage() {
               const task = previous[taskId];
               if (!task) return previous;
               const nextToolEvents = [...task.toolEvents];
-              const index = nextToolEvents.findIndex(
-                (item) => item.type === 'tool_request' && item.name === toolEvent.name,
+              const index = nextToolEvents.findIndex((item) =>
+                toolEvent.id ? item.id === toolEvent.id : item.type === 'tool_request' && item.name === toolEvent.name,
               );
               if (eventName === 'tool_executed' && index >= 0) {
                 nextToolEvents[index] = toolEvent;
@@ -737,13 +820,8 @@ export default function ChatPage() {
               descriptionStreaming: true,
               description: '',
             });
-            for (let index = 0; index <= data.length; index += 1) {
-              await new Promise((resolve) => window.setTimeout(resolve, 12));
-              updateWorkflowTask(taskId, {
-                description: data.slice(0, index),
-              });
-            }
-            updateWorkflowTask(taskId, { descriptionStreaming: false });
+            updateWorkflowTask(taskId, { description: data });
+            window.setTimeout(() => updateWorkflowTask(taskId, { descriptionStreaming: false }), 0);
           } else if (eventName === 'error') {
             const errorMessage = data || '代码生成失败';
             if (errorMessage.includes('lock') || errorMessage.includes('锁')) {
@@ -762,7 +840,15 @@ export default function ChatPage() {
       if (!finished && !isGraphRequest) {
         finished = true;
       }
-      if (!finished) {
+      if (!finished && isGraphRequest) {
+        const stored = sessionStorage.getItem(`graph-run:${appId}`);
+        const id = stored ? (JSON.parse(stored) as { runId?: string }).runId : undefined;
+        const run = id ? await chatApi.getGraphRun(id) : undefined;
+        if (run) setControlledRun(run);
+        if (run && ['paused', 'awaiting_approval', 'recoverable'].includes(run.status)) {
+          updateWorkflowTask(taskId, { status: run.status === 'awaiting_approval' ? '等待确认计划' : '已保存进度，等待继续', isGenerating: false });
+          return;
+        }
         throw new Error('生成连接提前结束，未收到完成信号');
       }
       if (isGraphRequest) {
@@ -778,6 +864,9 @@ export default function ChatPage() {
         return next;
       });
     } catch (error) {
+      if (isGraphRequest) updateWorkflowTask(taskId, {
+        status: error instanceof Error ? error.message : '无法获取任务进度',
+      });
       if (!(error instanceof DOMException && error.name === 'AbortError')) {
         toast({
           variant: 'destructive',
@@ -788,6 +877,8 @@ export default function ChatPage() {
         });
       }
     } finally {
+      await streamReader?.cancel().catch(() => undefined);
+      controller.abort();
       abortControllerRef.current = null;
       setIsGenerating(false);
       void appQuery.refetch();
@@ -805,12 +896,67 @@ export default function ChatPage() {
     }
   };
 
+  const controlRun = async (action: 'approve' | 'reject' | 'pause' | 'resume' | 'cancel') => {
+    if (!controlledRun || controlBusy) return;
+    setControlBusy(true);
+    try {
+      const run = await chatApi.controlGraphRun(controlledRun.id, action, controlledRun.checkpoint?.planHash);
+      setControlledRun(run);
+      if ((action === 'approve' || action === 'resume') && !isGenerating) {
+        void handleSendMessage(undefined, run.id);
+      }
+    } catch (error) {
+      toast({ variant: 'destructive', title: '任务操作失败', description: error instanceof Error ? error.message : '请稍后重试' });
+    } finally { setControlBusy(false); }
+  };
+
+  useEffect(() => {
+    if (!appId || isGenerating || !historyQuery.isSuccess || generationStartedRef.current) return;
+    let canceled = false;
+    const restoreActiveRun = async () => {
+      try {
+        let run;
+        try {
+          run = await chatApi.getActiveGraphRun(appId);
+        } catch (error) {
+          if (!(error instanceof Error) || !/task run not found|disabled/.test(error.message)) throw error;
+        }
+        // A lost create response can be recovered using the original request ID.
+        const pending = sessionStorage.getItem(`graph-request:${appId}`);
+        if (!run && pending) {
+          const request = JSON.parse(pending) as { message: string; requestId: string };
+          const result = await chatApi.createGraphRun(appId, request.message, request.requestId);
+          run = result.run;
+          sessionStorage.removeItem(`graph-request:${appId}`);
+        }
+        const stored = sessionStorage.getItem(`graph-run:${appId}`);
+        const storedRunId = stored
+          ? (JSON.parse(stored) as { runId?: string }).runId
+          : undefined;
+        if (!run && storedRunId) run = await chatApi.getGraphRun(storedRunId);
+        if (canceled || !run) return;
+        generationStartedRef.current = true;
+        setUseGraph(true);
+        void handleSendMessage(undefined, run.id);
+      } catch (error) {
+        if (!canceled && error instanceof Error && !/task run not found|disabled/.test(error.message)) {
+          toast({ variant: 'destructive', title: '任务恢复失败', description: error.message });
+        }
+      } finally {
+        if (!canceled) setRunDiscoveryDone(true);
+      }
+    };
+    void restoreActiveRun();
+    return () => { canceled = true; };
+  }, [appId, historyQuery.isSuccess]);
+
   useEffect(() => {
     if (
       !initialPrompt?.trim() ||
       !appId ||
       !appQuery.data ||
       !historyQuery.isSuccess ||
+      !runDiscoveryDone ||
       generationStartedRef.current
     ) {
       return;
@@ -824,6 +970,7 @@ export default function ChatPage() {
     appQuery.data,
     handleSendMessage,
     historyQuery.isSuccess,
+    runDiscoveryDone,
     initialPrompt,
     location.pathname,
     navigate,
@@ -955,20 +1102,38 @@ export default function ChatPage() {
             <div ref={chatEndRef} />
           </div>
           <div className="border-t p-4">
+            {useGraph && controlledRun && !['completed', 'failed', 'interrupted', 'canceled'].includes(controlledRun.status) && (
+              <div className="mb-3 space-y-2 rounded-md border p-3 text-sm">
+                <p>{({ pending: '任务排队中', running: '任务执行中', pausing: '正在暂停：等待当前节点完成并保存', paused: '任务已暂停', awaiting_approval: '请确认执行计划', cancelling: '正在终止任务', recoverable: '服务重启，进度可恢复' } as Record<string, string>)[controlledRun.status]}</p>
+                {controlledRun.checkpoint && <>
+                  <p className="whitespace-pre-wrap">目标：{controlledRun.checkpoint.plan.goal}</p>
+                  <p>代码类型：{controlledRun.checkpoint.plan.generationType}</p>
+                  <ul className="list-inside list-disc">{controlledRun.checkpoint.plan.todos.map(todo => <li key={todo.id}>{todo.status === 'completed' ? '已完成' : '待执行'}：{todo.title}</li>)}</ul>
+                  <p>约束：{controlledRun.checkpoint.plan.constraints.join('；')}</p>
+                  <p>验收：{controlledRun.checkpoint.plan.acceptance.join('；')}</p>
+                </>}
+                <div className="flex flex-wrap gap-2">
+                  {controlledRun.status === 'awaiting_approval' && <><Button size="sm" disabled={controlBusy || isGenerating} onClick={() => void controlRun('approve')}>批准并执行</Button><Button size="sm" variant="outline" disabled={controlBusy} onClick={() => void controlRun('reject')}>拒绝计划</Button></>}
+                  {controlledRun.status === 'running' && <Button size="sm" variant="outline" disabled={controlBusy} onClick={() => void controlRun('pause')}>暂停任务</Button>}
+                  {['paused', 'recoverable'].includes(controlledRun.status) && <Button size="sm" disabled={controlBusy || isGenerating} onClick={() => void controlRun('resume')}>继续任务</Button>}
+                  <Button size="sm" variant="outline" disabled={controlBusy || controlledRun.status === 'cancelling'} onClick={() => void controlRun('cancel')}>终止任务</Button>
+                </div>
+              </div>
+            )}
             <div className="flex items-center gap-2">
               <label className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
                 <input
                   type="checkbox"
                   checked={useGraph}
-                  disabled={isGenerating}
+                  disabled={isGenerating || restoreBusy || !runDiscoveryDone}
                   onChange={(event) => setUseGraph(event.target.checked)}
                 />
                 代码生成
               </label>
-              <Input value={message} placeholder="输入消息..." disabled={isGenerating}
+              <Input value={message} placeholder="输入消息..." disabled={isGenerating || restoreBusy || !runDiscoveryDone}
                 onChange={(event) => setMessage(event.target.value)}
                 onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void handleSendMessage(); } }} />
-              <Button onClick={() => void handleSendMessage()} disabled={isGenerating || !message.trim()}>
+              <Button onClick={() => void handleSendMessage()} disabled={isGenerating || restoreBusy || !runDiscoveryDone || !message.trim()}>
                 <Send className="h-4 w-4" />
               </Button>
             </div>
@@ -996,7 +1161,18 @@ export default function ChatPage() {
             >
               源码
             </Button>
+            <Button variant={showVersions ? 'secondary' : 'ghost'} size="sm" onClick={() => setShowVersions(value => !value)}>历史版本</Button>
           </div>
+          {showVersions && <div className="max-h-60 overflow-y-auto border-b bg-muted/20 p-3 text-sm">
+            <p className="mb-2 text-muted-foreground">恢复后会保留所有历史版本。正在处理任务时，请先完成或终止任务。</p>
+            {versionsQuery.isLoading && <p>正在加载历史版本…</p>}
+            {versionsQuery.isError && <p>历史版本加载失败。<button className="underline" onClick={() => void versionsQuery.refetch()}>重试</button></p>}
+            {versionsQuery.data?.versions.length === 0 && <p>完成第一次生成后，这里会保存历史版本。</p>}
+            {versionsQuery.data?.versions.map(version => <div key={version.id} className="flex items-center justify-between gap-2 border-t py-2">
+              <span>{new Date(version.createdAt).toLocaleString('zh-CN')}{version.restoredFromId !== '0' ? ' · 恢复记录' : ''}</span>
+              {version.current ? <span>当前版本</span> : <Button size="sm" variant="outline" disabled={!version.restorable || restoreBusy || isGenerating || hasActiveRun || !runDiscoveryDone} onClick={() => void restoreVersion(version.id)}>{!version.restorable ? '早期版本无法恢复' : restoreBusy ? '正在恢复…' : '恢复到这个版本'}</Button>}
+            </div>)}
+          </div>}
           <div className="flex-1 overflow-hidden">
             {activePanel === 'source' ? (
               <div className="flex h-full min-h-0">

@@ -10,6 +10,24 @@ import (
 
 type NoCodeAppAddResponse response.BaseResponse[string]
 
+type SourceVersionVo struct {
+	ID             int64     `json:"id,string"`
+	CreatedAt      time.Time `json:"createdAt"`
+	Current        bool      `json:"current"`
+	Restorable     bool      `json:"restorable"`
+	RestoredFromID int64     `json:"restoredFromId,string"`
+}
+
+type SourceVersionsVo struct {
+	CurrentVersionID int64             `json:"currentVersionId,string"`
+	Versions         []SourceVersionVo `json:"versions"`
+}
+
+type RestoreSourceRequest struct {
+	VersionID         int64 `json:"versionId,string"`
+	ExpectedVersionID int64 `json:"expectedVersionId,string"`
+}
+
 type NoCodeAppUpdateResponse response.BaseResponse[bool]
 
 type NoCodeAppDeleteResponse response.BaseResponse[bool]
@@ -33,6 +51,13 @@ type NoCodeAppAdminListResponse response.BaseResponse[response.PageResponse[mode
 type NoCodeGenCodeRequest struct {
 	AppId   int64  `json:"appId,string" vd:"$>0"` // 加 string 标签防止大整数精度丢失，vd 标签用于参数校验
 	Message string `json:"message" vd:"len($)>0"`
+}
+
+type GraphRunCreateRequest struct {
+	RequireApproval *bool  `json:"requireApproval"`
+	AppID           int64  `json:"appId,string" vd:"$>0"`
+	Message         string `json:"message" vd:"len($)>0"`
+	RequestID       string `json:"requestId" vd:"len($)>0"`
 }
 
 type NoCodeAppAddRequest struct {

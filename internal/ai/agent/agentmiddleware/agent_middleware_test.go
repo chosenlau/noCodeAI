@@ -1,10 +1,28 @@
 package agentmiddleware
 
 import (
+	"io"
 	"testing"
 
 	"github.com/cloudwego/eino/schema"
 )
+
+func TestOutputStreamPreservesToolOnlyAndUsageChunks(t *testing.T) {
+	toolChunk := &schema.Message{ToolCalls: []schema.ToolCall{{Function: schema.FunctionCall{Name: "writeFile", Arguments: "{}"}}}}
+	usageChunk := &schema.Message{ResponseMeta: &schema.ResponseMeta{Usage: &schema.TokenUsage{PromptTokens: 10}}}
+	m := &innerModel{}
+	stream := m.wrapOutputStream(schema.StreamReaderFromArray([]*schema.Message{toolChunk, usageChunk}))
+	defer stream.Close()
+	for _, expected := range []*schema.Message{toolChunk, usageChunk} {
+		actual, err := stream.Recv()
+		if err != nil || actual != expected {
+			t.Fatalf("non-text model output dropped: %v %v", actual, err)
+		}
+	}
+	if _, err := stream.Recv(); err != io.EOF {
+		t.Fatalf("expected EOF, got %v", err)
+	}
+}
 
 func TestValidateInput_RejectsInjectionAndInvalidInput(t *testing.T) {
 	tests := []string{

@@ -1,0 +1,9 @@
+# Merge under ai in your environment config; never infer the context window from
+# an arbitrary OpenAI-compatible model name. Set window to the provider's limit.
+ai:
+  context:
+    window: 32768
+    output: 8192
+    margin: 2048
+# Context admission uses conservative serialized UTF-8 bytes as token estimates.
+# Task-wide token/call/time Budget remains separate and is not reset by compact.

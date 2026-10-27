@@ -4,13 +4,15 @@ import (
 	"context"
 
 	"github.com/chosenlau/noCodeAI/config"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
 	"github.com/cloudwego/eino-ext/components/model/claude"
 	"github.com/cloudwego/eino/components/model"
 )
 
 type ClaudeChatModelWrapper struct {
 	*claude.ChatModel
-	ModelName string
+	ModelName      string
+	contextOptions contextmgr.Options
 }
 
 func NewClaudeChatModel(cfg *config.Config) *ClaudeChatModelWrapper {
@@ -23,10 +25,13 @@ func NewClaudeChatModel(cfg *config.Config) *ClaudeChatModelWrapper {
 		panic(err)
 	}
 	return &ClaudeChatModelWrapper{
-		ChatModel: model,
-		ModelName: cfg.AI.Model,
+		ChatModel:      model,
+		ModelName:      cfg.AI.Model,
+		contextOptions: cfg.AI.Context,
 	}
 }
+
+func (c *ClaudeChatModelWrapper) ContextOptions() contextmgr.Options { return c.contextOptions }
 
 func (c *ClaudeChatModelWrapper) GetModelName() string {
 	return c.ModelName

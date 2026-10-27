@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/chosenlau/noCodeAI/internal/api"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
+	"github.com/chosenlau/noCodeAI/internal/core/task"
 	"github.com/chosenlau/noCodeAI/internal/dal/model"
 	"github.com/chosenlau/noCodeAI/internal/service"
 	"github.com/chosenlau/noCodeAI/pkg/constants"
@@ -25,6 +27,217 @@ type AppHandler struct {
 	appService         service.IAppService
 	userService        service.IUserService
 	chatHistoryService service.IChatHistoryService
+}
+
+func (a *AppHandler) ListSourceVersions(ctx context.Context, c *app.RequestContext) {
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError))
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("appId"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.ParamsError))
+		return
+	}
+	result, err := a.appService.ListSourceVersions(ctx, id, user)
+	if err != nil {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
+		return
+	}
+	c.JSON(consts.StatusOK, response.NewSuccessResponse(result))
+}
+
+func (a *AppHandler) RestoreSourceVersion(ctx context.Context, c *app.RequestContext) {
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError))
+		return
+	}
+	id, err := strconv.ParseInt(c.Param("appId"), 10, 64)
+	if err != nil || id <= 0 {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.ParamsError))
+		return
+	}
+	var req api.RestoreSourceRequest
+	if err := c.BindAndValidate(&req); err != nil {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
+		return
+	}
+	version, err := a.appService.RestoreSourceVersion(ctx, id, req, user)
+	if err != nil {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
+		return
+	}
+	c.JSON(consts.StatusOK, response.NewSuccessResponse(strconv.FormatInt(version, 10)))
+}
+
+func (a *AppHandler) ControlGraphRun(ctx context.Context, c *app.RequestContext) {
+	runID, err := strconv.ParseInt(c.Param("runID"), 10, 64)
+	if err != nil || runID <= 0 {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.ParamsError))
+		return
+	}
+	user, ok := currentUser(c)
+	if !ok {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError))
+		return
+	}
+	var req struct {
+		Action   string `json:"action"`
+		PlanHash string `json:"planHash"`
+	}
+	if err := c.BindAndValidate(&req); err != nil {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
+		return
+	}
+	run, err := a.appService.ControlGraphRun(ctx, runID, req.Action, req.PlanHash, user)
+	if err != nil {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
+		return
+	}
+	c.JSON(consts.StatusOK, response.NewSuccessResponse(run))
+}
+
+func (a *AppHandler) StartGraphRun(ctx context.Context, c *app.RequestContext) {
+	var req api.GraphRunCreateRequest
+	if err := c.BindAndValidate(&req); err != nil {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
+		return
+	}
+	userVo, ok := currentUser(c)
+	if !ok {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError))
+		return
+	}
+	run, created, err := a.appService.StartGraphRun(ctx, &req, userVo)
+	if err != nil {
+		result := response.NewErrorResponse[any](err)
+		if run.ID > 0 {
+			result.Data = map[string]any{"activeRunId": strconv.FormatInt(run.ID, 10), "run": run}
+		}
+		c.JSON(consts.StatusOK, result)
+		return
+	}
+	c.JSON(consts.StatusOK, response.NewSuccessResponse(map[string]any{"run": run, "created": created}))
+}
+
+func (a *AppHandler) GetGraphRun(ctx context.Context, c *app.RequestContext) {
+	runID, err := strconv.ParseInt(c.Param("runID"), 10, 64)
+	if err != nil || runID <= 0 {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.ParamsError))
+		return
+	}
+	userVo, ok := currentUser(c)
+	if !ok {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError))
+		return
+	}
+	run, err := a.appService.GetGraphRun(ctx, runID, userVo)
+	if err != nil {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
+		return
+	}
+	c.JSON(consts.StatusOK, response.NewSuccessResponse(run))
+}
+
+func (a *AppHandler) GetActiveGraphRun(ctx context.Context, c *app.RequestContext) {
+	appID, err := strconv.ParseInt(c.Query("appId"), 10, 64)
+	if err != nil || appID <= 0 {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.ParamsError))
+		return
+	}
+	userVo, ok := currentUser(c)
+	if !ok {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](errorutil.NotLoginError))
+		return
+	}
+	run, err := a.appService.GetActiveGraphRun(ctx, appID, userVo)
+	if err != nil {
+		c.JSON(consts.StatusOK, response.NewErrorResponse[any](err))
+		return
+	}
+	c.JSON(consts.StatusOK, response.NewSuccessResponse(run))
+}
+
+func (a *AppHandler) SubscribeGraphRun(ctx context.Context, c *app.RequestContext) {
+	runID, err := strconv.ParseInt(c.Param("runID"), 10, 64)
+	if err != nil || runID <= 0 {
+		sendSseErrorAndExit(c, "invalid run id")
+		return
+	}
+	afterSequence := int64(0)
+	lastEventID := sse.GetLastEventID(&c.Request)
+	if lastEventID == "" {
+		lastEventID = c.Query("afterSeq")
+	}
+	if lastEventID != "" {
+		afterSequence, err = strconv.ParseInt(lastEventID, 10, 64)
+		if err != nil || afterSequence < 0 {
+			sendSseErrorAndExit(c, "invalid event sequence")
+			return
+		}
+	}
+	userVo, ok := currentUser(c)
+	if !ok {
+		sendSseErrorAndExit(c, "user is not logged in")
+		return
+	}
+	subscription, err := a.appService.SubscribeGraphRun(ctx, runID, afterSequence, userVo)
+	if err != nil {
+		sendSseErrorAndExit(c, err.Error())
+		return
+	}
+	defer subscription.Close()
+
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	w := sse.NewWriter(c)
+	for {
+		event, nextErr := subscription.Next(ctx)
+		if nextErr == io.EOF {
+			return
+		}
+		if nextErr != nil {
+			return
+		}
+		if event.Type == "heartbeat" {
+			if err := w.WriteEvent("", "heartbeat", []byte("ping")); err != nil {
+				return
+			}
+			c.Flush()
+			continue
+		}
+		data := graphRunEventData(event)
+		if err := w.WriteEvent(strconv.FormatInt(event.Sequence, 10), event.Type, data); err != nil {
+			return
+		}
+		c.Flush()
+	}
+}
+
+func graphRunEventData(event task.Event) []byte {
+	switch event.Type {
+	case task.EventError, task.EventDescriptionComplete:
+		var text string
+		if json.Unmarshal(event.Payload, &text) == nil {
+			return []byte(text)
+		}
+	case task.EventDone:
+		return []byte{1}
+	}
+	return event.Payload
+}
+
+func currentUser(c *app.RequestContext) (*api.UserVo, bool) {
+	value, exists := c.Get(constants.UserVoKey)
+	if !exists {
+		return nil, false
+	}
+	userVo, ok := value.(*api.UserVo)
+	return userVo, ok && userVo != nil
 }
 
 func NewAppHandler(
@@ -408,6 +621,8 @@ func (a *AppHandler) GraphToGenCode(ctx context.Context, c *app.RequestContext) 
 					switch envelope.Type {
 					case "step_started":
 						eventName = "step_started"
+					case "context_compacting", "context_ready":
+						eventName = envelope.Type
 					case "step_completed":
 						eventName = "step_completed"
 					case "tool_request":
@@ -464,6 +679,11 @@ func (a *AppHandler) ChatWithAgent(ctx context.Context, c *app.RequestContext) {
 			_ = writer.WriteEvent(lastEventID, "done", []byte("1"))
 			c.Flush()
 			return
+		}
+		if kind := contextmgr.EventKind(message); kind != "" {
+			_ = writer.WriteEvent(lastEventID, kind, []byte("{}"))
+			c.Flush()
+			continue
 		}
 		if message != nil && message.Content != "" {
 			_ = writer.WriteEvent(lastEventID, "message", []byte(message.Content))

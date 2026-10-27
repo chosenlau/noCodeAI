@@ -48,6 +48,9 @@ func (a *ImageCollectionPlanAgent) PlanImageCollection(ctx context.Context, mess
 	if err != nil {
 		return aimodel.ImageCollectionPlan{}, err
 	}
+	if result == nil {
+		return aimodel.ImageCollectionPlan{}, fmt.Errorf("image collection plan agent returned an empty response")
+	}
 
 	return parseImageCollectionPlan(result.Content)
 }

@@ -1,0 +1,8 @@
+# Merge into the selected config-<env>.yml after applying the SQL migration.
+features:
+  detached_graph_task: true
+task_runtime:
+  worker_count: 2
+  poll_interval: 500ms
+  shutdown_timeout: 20s
+  outbox_batch_size: 100

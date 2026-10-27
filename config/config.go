@@ -8,8 +8,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/bytedance/gopkg/util/logger"
+	"github.com/chosenlau/noCodeAI/internal/core/contextmgr"
 	"github.com/spf13/viper"
 )
 
@@ -22,6 +24,8 @@ type Config struct {
 	COS       COSConfig       `yaml:"cos" mapstructure:"cos"`
 	Pexels    PexelsConfig    `yaml:"pexels" mapstructure:"pexels"`
 	DashScope DashScopeConfig `yaml:"dashscope" mapstructure:"dashscope"`
+	Features  FeatureConfig   `yaml:"features" mapstructure:"features"`
+	Task      TaskConfig      `yaml:"task_runtime" mapstructure:"task_runtime"`
 }
 
 type ServerConfig struct {
@@ -44,10 +48,11 @@ type RedisConfig struct {
 }
 
 type AIConfig struct {
-	APIKey   string `mapstructure:"api_key"`
-	Model    string `mapstructure:"model"`
-	BaseURL  string `mapstructure:"base_url"`
-	Provider string `mapstructure:"provider"`
+	APIKey   string             `mapstructure:"api_key"`
+	Model    string             `mapstructure:"model"`
+	BaseURL  string             `mapstructure:"base_url"`
+	Provider string             `mapstructure:"provider"`
+	Context  contextmgr.Options `mapstructure:"context"`
 }
 
 type COSConfig struct {
@@ -65,6 +70,17 @@ type PexelsConfig struct {
 type DashScopeConfig struct {
 	APIKey     string `yaml:"api-key" mapstructure:"api-key"`
 	ImageModel string `yaml:"image-model" mapstructure:"image-model"`
+}
+
+type FeatureConfig struct {
+	DetachedGraphTask bool `yaml:"detached_graph_task" mapstructure:"detached_graph_task"`
+}
+
+type TaskConfig struct {
+	WorkerCount     int           `yaml:"worker_count" mapstructure:"worker_count"`
+	PollInterval    time.Duration `yaml:"poll_interval" mapstructure:"poll_interval"`
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout" mapstructure:"shutdown_timeout"`
+	OutboxBatchSize int           `yaml:"outbox_batch_size" mapstructure:"outbox_batch_size"`
 }
 
 var (

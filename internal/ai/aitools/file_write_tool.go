@@ -4,11 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
+	"github.com/chosenlau/noCodeAI/internal/core/execution"
 	"path/filepath"
 	"strings"
 
-	file "github.com/chosenlau/noCodeAI/pkg/myfile"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 )
@@ -42,46 +41,26 @@ func fileWriteToolFunc(ctx context.Context, params FileWriteToolParams) (*schema
 	}
 	relativePath := params.RelativePath
 	content := params.Content
-	appId := ctx.Value("appId").(int64)
-
-	path := filepath.Clean(relativePath)
-
-	if !filepath.IsAbs(path) {
-		codeOutputRoot, err := file.GetCodeOutputRoot()
-		if err != nil {
-			return nil, fmt.Errorf("获取代码输出根目录失败: %w", err)
-		}
-		projectDirName := fmt.Sprintf("vue_project_%d", appId)
-		projectRoot := filepath.Join(codeOutputRoot, projectDirName)
-		path = filepath.Join(projectRoot, relativePath)
-	}
-
-	parentDir := filepath.Dir(path)
-	if parentDir != "" && parentDir != "." {
-		err := os.MkdirAll(parentDir, 0755)
-		if err != nil {
-			return nil, fmt.Errorf("创建父目录失败: %s, 错误: %v", parentDir, err)
-		}
-	}
-
-	err := os.WriteFile(path, []byte(content), 0644)
+	root, path, err := openToolRoot(ctx, relativePath)
 	if err != nil {
-		return nil, fmt.Errorf("文件写入失败: %s, 错误: %v", relativePath, err)
-	}
-	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	absPath, _ := filepath.Abs(path)
-	fmt.Printf("成功写入文件: %s\n", absPath)
-
-	result := &schema.ToolResult{
-		Parts: []schema.ToolOutputPart{
-			{Type: schema.ToolPartTypeText, Text: "文件写入成功: " + relativePath},
-		},
-	}
-
-	return schema.StreamReaderFromArray([]*schema.ToolResult{result}), nil
+	defer root.Close()
+	return journalMutation(ctx, "writeFile", params, func() (string, error) {
+		if err := execution.CheckWrite(root, path, int64(len(content))); err != nil {
+			return "", err
+		}
+		if err := root.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return "", err
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if err := root.WriteFile(path, []byte(content), 0644); err != nil {
+			return "", err
+		}
+		return "文件写入成功: " + relativePath, nil
+	})
 }
 
 func (t *FileWriteTool) GenerateToolExecutedResult(arguments string) string {

@@ -4,10 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 
-	file "github.com/chosenlau/noCodeAI/pkg/myfile"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
 )
@@ -48,39 +45,25 @@ func fileDeleteToolFunc(ctx context.Context, params FileDeleteToolParams) (*sche
 		return nil, err
 	}
 	relativePath := params.RelativePath
-	appId := ctx.Value("appId").(int64)
-
-	path := filepath.Clean(relativePath)
-
-	if !filepath.IsAbs(path) {
-		codeOutputRoot, err := file.GetCodeOutputRoot()
-		if err != nil {
-			return nil, fmt.Errorf("获取代码输出根目录失败: %w", err)
-		}
-		projectDirName := fmt.Sprintf("vue_project_%d", appId)
-		projectRoot := filepath.Join(codeOutputRoot, projectDirName)
-		path = filepath.Join(projectRoot, relativePath)
-	}
-
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return nil, fmt.Errorf("文件不存在: %s", relativePath)
-	}
-
-	err := os.Remove(path)
+	root, path, err := openToolRoot(ctx, relativePath)
 	if err != nil {
-		return nil, fmt.Errorf("文件删除失败: %s, 错误: %v", relativePath, err)
-	}
-	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-
-	fmt.Printf("成功删除文件: %s\n", path)
-
-	result := &schema.ToolResult{
-		Parts: []schema.ToolOutputPart{
-			{Type: schema.ToolPartTypeText, Text: "文件删除成功: " + relativePath},
-		},
-	}
-
-	return schema.StreamReaderFromArray([]*schema.ToolResult{result}), nil
+	defer root.Close()
+	return journalMutation(ctx, "deleteFile", params, func() (string, error) {
+		info, err := root.Stat(path)
+		if err != nil {
+			return "", err
+		}
+		if !info.Mode().IsRegular() {
+			return "", fmt.Errorf("deleteFile only deletes regular files")
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if err := root.Remove(path); err != nil {
+			return "", err
+		}
+		return "文件删除成功: " + relativePath, nil
+	})
 }

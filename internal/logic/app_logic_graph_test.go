@@ -201,7 +201,7 @@ func TestGraphToGenCodeRealLLM(t *testing.T) {
 	)
 
 	chatHistory := &fakeChatHistoryService{}
-	appService := NewAppService(facade, nil, chatHistory, nil, memoryStore, graph, nil)
+	appService := NewAppService(facade, nil, chatHistory, nil, memoryStore, graph, nil, nil)
 	appService.loadApp = func(context.Context, int64) (*model.App, error) {
 		return &model.App{
 			ID: appID, UserID: userID, CodeGenType: string(enum.HtmlCodeGen),
@@ -215,7 +215,9 @@ func TestGraphToGenCodeRealLLM(t *testing.T) {
 	}
 	user := &api.UserVo{ID: userID}
 
-	stream, workflowContext, err := appService.GraphToGenCode(
+	// This opt-in model test exercises the inner Graph. Public-entry lease and
+	// publication contracts are covered with deterministic coordinator/store tests.
+	stream, workflowContext, err := appService.graphToGenCode(
 		context.Background(),
 		appID,
 		"请增加一个登录按钮",
@@ -235,6 +237,7 @@ func TestGraphToGenCodeRealLLM(t *testing.T) {
 		require.NoError(t, err)
 	}
 	require.NotEmpty(t, workflowContext.CodeContent)
+	appService.savePublishedWorkflow(context.Background(), workflowContext, appID, userID)
 	require.NotEmpty(t, memoryStore.messages[memoryID])
 	require.NotEmpty(t, updatedArchitecture)
 	require.Len(t, chatHistory.messages, 2)

@@ -3,6 +3,7 @@ package aitools
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/chosenlau/noCodeAI/config"
@@ -11,7 +12,15 @@ import (
 	"github.com/cloudwego/hertz/pkg/common/test/assert"
 )
 
+func requireExternalTools(t *testing.T) {
+	t.Helper()
+	if os.Getenv("RUN_EXTERNAL_TOOLS") != "1" {
+		t.Skip("set RUN_EXTERNAL_TOOLS=1 to run external image/tool tests")
+	}
+}
+
 func TestCreateImageSearchTool(t *testing.T) {
+	requireExternalTools(t)
 	initConfig := config.InitConfig()
 	images, err := SearchImages(initConfig.Pexels.APIKey, "宠物")
 	if err != nil {
@@ -24,6 +33,7 @@ func TestCreateImageSearchTool(t *testing.T) {
 }
 
 func TestCreateUndrawIllustrationTool(t *testing.T) {
+	requireExternalTools(t)
 	undrawIllustrations, err := SearchUndrawIllustrations("sad")
 	if err != nil {
 		fmt.Println(err)
@@ -35,6 +45,7 @@ func TestCreateUndrawIllustrationTool(t *testing.T) {
 }
 
 func TestCreateMermaidDiagramTool(t *testing.T) {
+	requireExternalTools(t)
 	initConfig := config.InitConfig()
 	cosClient := dal.InitCOSClient(initConfig)
 	cosManager := manager.NewCosManager(cosClient, initConfig)
@@ -51,10 +62,13 @@ func TestCreateMermaidDiagramTool(t *testing.T) {
 		fmt.Println(err)
 	}
 	assert.NotNil(t, mermaidDiagram)
-	fmt.Println(mermaidDiagram[0])
+	if len(mermaidDiagram) > 0 {
+		fmt.Println(mermaidDiagram[0])
+	}
 }
 
 func TestCreateLogoGeneratorTool(t *testing.T) {
+	requireExternalTools(t)
 	initConfig := config.InitConfig()
 	client := dal.InitCOSClient(initConfig)
 	cosManager := manager.NewCosManager(client, initConfig)

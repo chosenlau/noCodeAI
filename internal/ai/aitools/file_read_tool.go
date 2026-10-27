@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	file "github.com/chosenlau/noCodeAI/pkg/myfile"
+	"github.com/chosenlau/noCodeAI/internal/core/execution"
 	"github.com/cloudwego/eino/components/tool/utils"
 	"github.com/cloudwego/eino/schema"
-	"os"
-	"path/filepath"
 )
 
 type FileReadToolParams struct {
@@ -47,21 +45,12 @@ func fileReadToolFunc(ctx context.Context, params FileReadToolParams) (*schema.S
 		return nil, err
 	}
 	relativePath := params.RelativePath
-	appId := ctx.Value("appId").(int64)
-
-	path := filepath.Clean(relativePath)
-
-	if !filepath.IsAbs(path) {
-		codeOutputRoot, err := file.GetCodeOutputRoot()
-		if err != nil {
-			return nil, fmt.Errorf("获取代码输出根目录失败: %w", err)
-		}
-		projectDirName := fmt.Sprintf("vue_project_%d", appId)
-		projectRoot := filepath.Join(codeOutputRoot, projectDirName)
-		path = filepath.Join(projectRoot, relativePath)
+	root, path, err := openToolRoot(ctx, relativePath)
+	if err != nil {
+		return nil, err
 	}
-
-	content, err := os.ReadFile(path)
+	defer root.Close()
+	content, err := execution.ReadFile(root, path)
 	if err != nil {
 		return nil, fmt.Errorf("文件读取失败: %s, 错误: %v", relativePath, err)
 	}

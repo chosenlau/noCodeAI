@@ -48,6 +48,7 @@ type MemoryMetadata struct {
 	TotalTokens      int64
 	Summarizing      bool
 	SummaryError     string
+	SummaryOwner     string
 	UpdatedAt        time.Time
 }
 
@@ -154,6 +155,7 @@ func (r *RedisMemoryStore) GetMetadata(ctx context.Context, memoryId string) (*M
 	metadata := &MemoryMetadata{}
 	metadata.Summary = values["summary"]
 	metadata.SummaryError = values["summary_error"]
+	metadata.SummaryOwner = values["summary_owner"]
 	metadata.Summarizing = values["summarizing"] == "1"
 	metadata.Round = parseInt64(values["round"])
 	metadata.PromptTokens = parseInt64(values["prompt_tokens"])
@@ -181,6 +183,7 @@ func (r *RedisMemoryStore) SetMetadata(ctx context.Context, memoryId string, met
 		"total_tokens":      metadata.TotalTokens,
 		"summarizing":       boolToInt(metadata.Summarizing),
 		"summary_error":     metadata.SummaryError,
+		"summary_owner":     metadata.SummaryOwner,
 		"updated_at":        updatedAt.Unix(),
 	}
 	pipe := r.redisClient.Pipeline()

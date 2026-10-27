@@ -3,6 +3,7 @@ package aitools
 import (
 	"context"
 	"fmt"
+	"github.com/chosenlau/noCodeAI/internal/core/execution"
 
 	"github.com/bytedance/gopkg/util/logger"
 	"github.com/cloudwego/eino/components/tool/utils"
@@ -33,6 +34,14 @@ func CreateExitTool() (*ExitTool, error) {
 }
 
 func exitToolFunc(ctx context.Context, params ExitToolParams) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if budget := execution.GetBudget(ctx); budget != nil {
+		if err := budget.ConsumeTool(); err != nil {
+			return "", err
+		}
+	}
 	logger.Info("AI 请求退出工具调用")
 	return "不要继续调用工具，可以输出最终结果了", nil
 }
